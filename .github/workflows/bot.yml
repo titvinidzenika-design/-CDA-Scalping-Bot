@@ -1,4 +1,35 @@
-name: CDA Bot Check
+name: CDA Bot Connection Test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+
+    steps:
+      - name: Get project code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Start bot briefly
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        run: |
+          timeout 30s python bot.py || code=$?
+          if [ "${code:-0}" -eq 124 ]; then
+            echo "Bot ran for 30 seconds as expected."
+          elif [ "${code:-0}" -ne 0 ]; then
+            exit "$code"
+          finame: CDA Bot Check
 
 on:
   workflow_dispatch:
