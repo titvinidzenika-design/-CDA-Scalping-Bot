@@ -178,10 +178,10 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🚀 **24/7 AI Crypto Monitor 2.0 ჩართულია!**\n\n"
         "თქვენ ავტომატურად დარეგისტრირდით 24/7 ავტომატური სიგნალების მისაღებად!\n\n"
         "📜 **ხელმისაწვდომი ბრძანებები:**\n"
-        "▶ `/btc` – BTC/USDT-ის MTF + ATR ანალიზი\n"
-        "▶ `/sol` – SOL/USDT-ის MTF + ATR ანალიზი\n"
-        "▶ `/news` – სიახლეები + აქტივის იდენტიფიკაცია + BUY/SELL სიგნალი\n"
-        "▶ `/status` – ბოტის აქტიური სტატუსი"
+        "▶ /btc – BTC/USDT-ის MTF + ATR ანალიზი\n"
+        "▶ /sol – SOL/USDT-ის MTF + ATR ანალიზი\n"
+        "▶ /news – სიახლეები + აქტივის იდენტიფიკაცია + BUY/SELL სიგნალი\n"
+        "▶ /status – ბოტის აქტიური სტატუსი"
     )
     await update.message.reply_text(msg, parse_mode="Markdown")
 
