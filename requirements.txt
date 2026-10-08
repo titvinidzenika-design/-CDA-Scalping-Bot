@@ -1,5 +1,6 @@
 python-telegram-bot
 ccxt
-flask
-requests
 pandas
+requests
+flask
+feedparser
