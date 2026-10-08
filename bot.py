@@ -2,6 +2,7 @@ import os
 import time
 import threading
 import requests
+import asyncio
 import pandas as pd
 import ccxt
 import feedparser
@@ -15,8 +16,10 @@ from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 PORT = int(os.getenv("PORT", "10000"))
 
-# Cooldown Tracker: { 'BTC/USDT': timestamp, 'SOL/USDT': timestamp }
+# Cooldown Tracker & Chat ID Storage
 last_signal_time = {}
+user_chat_ids = set()
+main_loop = None
 
 # --- CCXT Exchange Setup ---
 exchange = ccxt.binance({
@@ -63,7 +66,6 @@ def calculate_indicators(df):
 
 # --- News Fetcher + Accurate Asset Tagging + Sentiment ---
 def get_crypto_news():
-    """იღებს სიახლეებს, ზუსტად მიუთითებს აქტივს (BTC/SOL/ALL CRYPTO) და დებს სიგნალს"""
     rss_urls = [
         "https://www.cryptoglobe.com/latest/feed/",
         "https://www.coindesk.com/arc/outboundfeeds/rss/",
@@ -81,7 +83,6 @@ def get_crypto_news():
                 if title and link:
                     title_lower = title.lower()
                     
-                    # აქტივის ზუსტი იდენტიფიკაცია
                     has_btc = 'btc' in title_lower or 'bitcoin' in title_lower
                     has_sol = 'sol' in title_lower or 'solana' in title_lower
                     
@@ -94,7 +95,6 @@ def get_crypto_news():
                     else:
                         coin_tag = "🌐 ALL CRYPTO (BTC & SOL)"
 
-                    # განწყობის / სიგნალის ანალიზი
                     analysis = TextBlob(title)
                     polarity = analysis.sentiment.polarity
                     
@@ -172,8 +172,11 @@ def analyze_market(symbol):
 
 # --- Telegram Bot Commands ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    user_chat_ids.add(chat_id)
     msg = (
         "🚀 **24/7 AI Crypto Monitor 2.0 ჩართულია!**\n\n"
+        "თქვენ ავტომატურად დარეგისტრირდით 24/7 ავტომატური სიგნალების მისაღებად!\n\n"
         "📜 **ხელმისაწვდომი ბრძანებები:**\n"
         "▶ `/btc` – BTC/USDT-ის MTF + ATR ანალიზი\n"
         "▶ `/sol` – SOL/USDT-ის MTF + ATR ანალიზი\n"
@@ -183,6 +186,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg, parse_mode="Markdown")
 
 async def btc_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_chat_ids.add(update.effective_chat.id)
     await update.message.reply_text("⏳ ითვლება BTC/USDT სიღრმისეული ანალიზი...")
     data = analyze_market("BTC/USDT")
     if not data:
@@ -203,6 +207,7 @@ async def btc_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(res, parse_mode="Markdown")
 
 async def sol_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_chat_ids.add(update.effective_chat.id)
     await update.message.reply_text("⏳ ითვლება SOL/USDT სიღრმისეული ანალიზი...")
     data = analyze_market("SOL/USDT")
     if not data:
@@ -223,12 +228,14 @@ async def sol_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(res, parse_mode="Markdown")
 
 async def news_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_chat_ids.add(update.effective_chat.id)
     await update.message.reply_text("⏳ იტვირთება, იდენტიფიცირდება და ანალიზდება სიახლეები...")
     news_text = get_crypto_news()
     res = f"📰 **უახლესი კრიპტო სიახლეები და ბაზარზე გავლენა:**\n\n{news_text}"
     await update.message.reply_text(res, parse_mode="Markdown", disable_web_page_preview=True)
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_chat_ids.add(update.effective_chat.id)
     await update.message.reply_text("✅ **ბოტი აქტიურია და 24/7 მონიტორინგი ჩართულია!**", parse_mode="Markdown")
 
 # --- Flask Server ---
@@ -241,8 +248,15 @@ def home():
 def run_flask():
     app.run(host='0.0.0.0', port=PORT)
 
-# --- Automated Scanner ---
-def auto_market_scanner():
+# --- Automated Scanner with Auto Telegram Push ---
+async def send_telegram_alert(tg_app, alert_text):
+    for cid in list(user_chat_ids):
+        try:
+            await tg_app.bot.send_message(chat_id=cid, text=alert_text, parse_mode="Markdown")
+        except Exception as e:
+            print(f"Failed to send alert to {cid}: {e}")
+
+def auto_market_scanner(tg_app):
     symbols = ["BTC/USDT", "SOL/USDT"]
     while True:
         try:
@@ -254,21 +268,29 @@ def auto_market_scanner():
                         continue
 
                     last_signal_time[symbol] = now
-                    print(f"ALERT: {symbol} -> {data['signal']}")
+                    alert_text = (
+                        f"🚨 **ავტომატური სიგნალი: {data['symbol']}**\n\n"
+                        f"💡 **მოქმედება:** {data['signal']}\n"
+                        f"🔹 **მიმდინარე ფასი:** ${data['price']:.2f}\n"
+                        f"🎯 **Take Profit:** ${data['tp']:.2f}\n"
+                        f"🛑 **Stop Loss:** ${data['sl']:.2f}\n"
+                    )
+                    if main_loop:
+                        asyncio.run_coroutine_threadsafe(send_telegram_alert(tg_app, alert_text), main_loop)
 
-            time.sleep(180)
+            time.sleep(180) # 3 წუთის ინტერვალი
         except Exception as e:
             print(f"Auto scanner error: {e}")
             time.sleep(60)
 
 # --- Main Application Start ---
 def main():
+    global main_loop
     if not TELEGRAM_BOT_TOKEN:
         print("Error: TELEGRAM_BOT_TOKEN environment variable is missing!")
         return
 
     threading.Thread(target=run_flask, daemon=True).start()
-    threading.Thread(target=auto_market_scanner, daemon=True).start()
 
     tg_app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
 
@@ -278,7 +300,10 @@ def main():
     tg_app.add_handler(CommandHandler("news", news_command))
     tg_app.add_handler(CommandHandler("status", status_command))
 
+    threading.Thread(target=auto_market_scanner, args=(tg_app,), daemon=True).start()
+
     print("Bot is up and running...")
+    main_loop = asyncio.get_event_loop()
     tg_app.run_polling()
 
 if __name__ == "__main__":
