@@ -1,211 +1,72 @@
 import os
-import asyncio
+import time
 import threading
 import requests
-import ccxt
 import pandas as pd
+import ccxt
+from datetime import datetime, timedelta
 from flask import Flask
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-# 1. Flask Web Server (Render-ისთვის)
-app_flask = Flask(__name__)
+# --- Configuration & Environment Variables ---
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+CRYPTOPANIC_API_KEY = os.getenv("CRYPTOPANIC_API_KEY", "")
+PORT = int(os.getenv("PORT", "10000"))
 
-@app_flask.route('/')
-def health_check():
-    return "Bot is running 24/7!", 200
+# Cooldown Tracker: { 'BTC/USDT': timestamp, 'SOL/USDT': timestamp }
+last_signal_time = {}
 
-def run_flask():
-    port = int(os.environ.get("PORT", 10000))
-    app_flask.run(host="0.0.0.0", port=port)
+# --- CCXT Exchange Setup ---
+exchange = ccxt.binance({
+    'enableRateLimit': True,
+    'options': {'defaultType': 'spot'}
+})
 
-# 2. ძირითადი პარამეტრები
-TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-CHAT_ID = None
-
-exchange = ccxt.binance({'enableRateLimit': True})
-SYMBOLS = ['BTC/USDT', 'SOL/USDT']
-
-# 3. გლობალური სიახლეების ფუნქცია
-def get_crypto_news():
+# --- Helper Functions for Data & Indicators ---
+def fetch_ohlcv_pd(symbol, timeframe='5m', limit=100):
+    """ითვლის OHLCV მონაცემებს და აბრუნებს Pandas DataFrame-ს"""
     try:
-        url = "https://cryptopanic.com/api/v1/posts/?auth_token=free&filter=important"
-        response = requests.get(url, timeout=5)
-        if response.status_code == 200:
-            data = response.json()
-            results = data.get('results', [])
-            if results:
-                latest_news = results[0]
-                title = latest_news.get('title')
-                domain = latest_news.get('domain')
-                votes = latest_news.get('votes', {})
-                positive = votes.get('positive', 0)
-                negative = votes.get('negative', 0)
-                
-                sentiment = "Neutral 🟡"
-                if positive > negative + 5:
-                    sentiment = "Bullish 🟢"
-                elif negative > positive + 5:
-                    sentiment = "Bearish 🔴"
-
-                return f"📰 **გლობალური სიახლე ({domain}):**\n{title}\n\n📊 **განწყობა:** {sentiment}"
-    except Exception as e:
-        print(f"News API Error: {e}")
-    return "❌ სიახლეების წამოღება ვერ მოხერხდა."
-
-# 4. ტექნიკური ანალიზის ფუნქცია
-def analyze_market_advanced(symbol):
-    try:
-        ohlcv = exchange.fetch_ohlcv(symbol, timeframe='15m', limit=200)
+        ohlcv = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        
-        df['ema_200'] = df['close'].ewm(span=200, adjust=False).mean()
-        
-        delta = df['close'].diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-        rs = gain / loss
-        df['rsi'] = 100 - (100 / (1 + rs))
-        df['vol_sma'] = df['volume'].rolling(window=20).mean()
-
-        last = df.iloc[-1]
-        close = last['close']
-        ema200 = last['ema_200']
-        rsi = last['rsi']
-        volume = last['volume']
-        vol_sma = last['vol_sma']
-
-        if close > ema200 and rsi < 40 and volume > vol_sma * 1.2:
-            return {
-                'type': '🟢 HIGH-PROBABILITY LONG',
-                'symbol': symbol,
-                'price': close,
-                'sl': round(close * 0.992, 2),
-                'tp': round(close * 1.016, 2),
-                'rsi': round(rsi, 2),
-                'reason': 'EMA-200 მხარდაჭერა + დაბალი RSI + მოცულობის ზრდა'
-            }
-        elif close < ema200 and rsi > 60 and volume > vol_sma * 1.2:
-            return {
-                'type': '🔴 HIGH-PROBABILITY SHORT',
-                'symbol': symbol,
-                'price': close,
-                'sl': round(close * 1.008, 2),
-                'tp': round(close * 0.984, 2),
-                'rsi': round(rsi, 2),
-                'reason': 'EMA-200 წინააღმდეგობა + მაღალი RSI + მოცულობის ზრდა'
-            }
-        else:
-            return {
-                'type': '⚪ NEUTRAL (მოლოდინის რეჟიმი)',
-                'symbol': symbol,
-                'price': close,
-                'rsi': round(rsi, 2),
-                'reason': 'ზუსტი სიგნალის პირობები ჯერ არ დაკმაყოფილებულა'
-            }
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        return df
     except Exception as e:
-        print(f"Analysis error for {symbol}: {e}")
-    return None
+        print(f"Error fetching OHLCV for {symbol} ({timeframe}): {e}")
+        return None
 
-# 5. ფონური მონიტორინგი (24/7)
-async def market_monitor(app):
-    global CHAT_ID
-    news_counter = 0
+def calculate_indicators(df):
+    """ითვლის EMA200, RSI, ATR და Volume SMA-ს"""
+    if df is None or len(df) < 50:
+        return df
 
-    while True:
-        if CHAT_ID:
-            for symbol in SYMBOLS:
-                signal = analyze_market_advanced(symbol)
-                if signal and 'NEUTRAL' not in signal['type']:
-                    msg = (
-                        f"🎯 **{signal['type']} ({signal['symbol']})**\n\n"
-                        f"💵 **შესვლის ფასი:** ${signal['price']}\n"
-                        f"🛑 **Stop-Loss:** ${signal['sl']}\n"
-                        f"🎯 **Take-Profit:** ${signal['tp']}\n"
-                        f"📉 **RSI:** {signal['rsi']}\n"
-                        f"💡 **საფუძველი:** {signal['reason']}"
-                    )
-                    await app.bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode='Markdown')
+    # EMA 200
+    df['ema200'] = df['close'].ewm(span=200, adjust=False).mean()
 
-            news_counter += 1
-            if news_counter >= 30:
-                news_msg = get_crypto_news()
-                if "❌" not in news_msg:
-                    await app.bot.send_message(chat_id=CHAT_ID, text=news_msg, parse_mode='Markdown')
-                news_counter = 0
+    # RSI 14
+    delta = df['close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    rs = gain / loss
+    df['rsi'] = 100 - (100 / (1 + rs))
 
-        await asyncio.sleep(60)
+    # ATR 14 (Average True Range)
+    high_low = df['high'] - df['low']
+    high_close = (df['high'] - df['close'].shift()).abs()
+    low_close = (df['low'] - df['close'].shift()).abs()
+    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+    df['atr'] = tr.rolling(window=14).mean()
 
-async def post_init(app):
-    asyncio.create_task(market_monitor(app))
+    # Volume SMA 20
+    df['vol_sma20'] = df['volume'].rolling(window=20).mean()
 
-# --- 6. TELEGRAM BOTS COMMAND HANDLERS (ბრძანებები) ---
+    return df
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global CHAT_ID
-    CHAT_ID = update.effective_chat.id
-    msg = (
-        "🚀 **24/7 AI Crypto Monitor ჩართულია!**\n\n"
-        "📜 **ხელმისაწვდომი ბრძანებები:**\n"
-        "▶️ /btc — BTC/USDT-ის მომენტალური ანალიზი\n"
-        "▶️ /sol — SOL/USDT-ის მომენტალური ანალიზი\n"
-        "▶️ /news — უახლესი გლობალური სიახლეები\n"
-        "▶️ /status — ბოტის სტატუსის შემოწმება"
-    )
-    await update.message.reply_text(msg, parse_mode='Markdown')
-
-async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("✅ ბოტი აქტიურია და მუშაობს 24/7 რეჟიმში!")
-
-async def btc_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("⏳ ითვლება BTC/USDT ანალიზი...")
-    signal = analyze_market_advanced('BTC/USDT')
-    if signal:
-        msg = (
-            f"📊 **BTC/USDT ანალიზის შედეგი:**\n\n"
-            f"სტატუსი: {signal['type']}\n"
-            f"💵 ფასი: ${signal['price']}\n"
-            f"📉 RSI: {signal['rsi']}\n"
-            f"💡 დეტალი: {signal['reason']}"
-        )
-        await update.message.reply_text(msg, parse_mode='Markdown')
-
-async def sol_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("⏳ ითვლება SOL/USDT ანალიზი...")
-    signal = analyze_market_advanced('SOL/USDT')
-    if signal:
-        msg = (
-            f"📊 **SOL/USDT ანალიზის შედეგი:**\n\n"
-            f"სტატუსი: {signal['type']}\n"
-            f"💵 ფასი: ${signal['price']}\n"
-            f"📉 RSI: {signal['rsi']}\n"
-            f"💡 დეტალი: {signal['reason']}"
-        )
-        await update.message.reply_text(msg, parse_mode='Markdown')
-
-async def news_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("⏳ იტვირთება უახლესი სიახლეები...")
-    news = get_crypto_news()
-    await update.message.reply_text(news, parse_mode='Markdown')
-
-# --- 7. MAIN FUNCTION ---
-
-def main():
-    if not TOKEN:
-        raise RuntimeError("TELEGRAM_BOT_TOKEN არ არის მითითებული!")
-
-    threading.Thread(target=run_flask, daemon=True).start()
-
-    app = ApplicationBuilder().token(TOKEN).post_init(post_init).build()
-
-    # ბრძანებების რეგისტრაცია
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("status", status_command))
-    app.add_handler(CommandHandler("btc", btc_command))
-    app.add_handler(CommandHandler("sol", sol_command))
-    app.add_handler(CommandHandler("news", news_command))
-
-    app.run_polling()
-
-if __name__ == "__main__":
-    main()
+# --- CryptoPanic News & Sentiment Fetcher ---
+def get_cryptopanic_news(symbol=""):
+    """იღებს უახლეს სიახლეებს და აფასებს განწყობას (Sentiment)"""
+    if not CRYPTOPANIC_API_KEY:
+        return {"text": "CryptoPanic API key არ არის მითითებული.", "sentiment": "NEUTRAL"}
+    
+    currencies = "BTC" if "BTC" in symbol else ("SOL" if "SOL" in symbol else "")
+    url = f"
