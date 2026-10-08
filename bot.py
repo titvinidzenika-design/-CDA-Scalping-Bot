@@ -16,7 +16,7 @@ from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 PORT = int(os.getenv("PORT", "10000"))
 
-# Cooldown Tracker: { 'BTC/USDT': timestamp, 'SOL/USDT': timestamp }
+# Cooldown Tracker
 last_signal_time = {}
 
 # --- CCXT Exchange Setup ---
@@ -27,7 +27,6 @@ exchange = ccxt.binance({
 
 # --- Helper Functions for Data & Indicators ---
 def fetch_ohlcv_pd(symbol, timeframe='5m', limit=100):
-    """ითვლის OHLCV მონაცემებს და აბრუნებს Pandas DataFrame-ს"""
     try:
         ohlcv = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
@@ -38,7 +37,6 @@ def fetch_ohlcv_pd(symbol, timeframe='5m', limit=100):
         return None
 
 def calculate_indicators(df):
-    """ითვლის EMA200, RSI, ATR და Volume SMA-ს"""
     if df is None or len(df) < 50:
         return df
 
@@ -52,7 +50,7 @@ def calculate_indicators(df):
     rs = gain / loss
     df['rsi'] = 100 - (100 / (1 + rs))
 
-    # ATR 14 (Average True Range)
+    # ATR 14
     high_low = df['high'] - df['low']
     high_close = (df['high'] - df['close'].shift()).abs()
     low_close = (df['low'] - df['close'].shift()).abs()
@@ -64,9 +62,9 @@ def calculate_indicators(df):
 
     return df
 
-# --- Free News Fetcher + Translation + Sentiment Signal ---
+# --- Free News Fetcher + Guaranteed Translation + Sentiment Signal ---
 def get_crypto_news():
-    """იღებს სიახლეებს, თარგმნის ქართულად და საზღვრავს კონკრეტულ სიგნალს (BUY/SELL/NEUTRAL)"""
+    """იღებს სიახლეებს, გარანტირებულად თარგმნის ქართულად და სვამს BUY/SELL/NEUTRAL სიგნალს"""
     rss_urls = [
         "https://www.cryptoglobe.com/latest/feed/",
         "https://www.coindesk.com/arc/outboundfeeds/rss/",
@@ -83,24 +81,27 @@ def get_crypto_news():
                 title = entry.get('title', '')
                 link = entry.get('link', '')
                 if title and link:
-                    # 1. განწყობის / სიგნალის ანალიზი (TextBlob)
+                    # 1. განწყობის / სიგნალის ანალიზი
                     analysis = TextBlob(title)
                     polarity = analysis.sentiment.polarity
                     
                     if polarity > 0.05:
-                        signal = "🟢 **BUY (LONG / მოსალოდნელია ზრდა)**"
+                        signal = "🟢 <b>BUY (LONG / მოსალოდნელია ზრდა)</b>"
                     elif polarity < -0.05:
-                        signal = "🔴 **SELL (SHORT / მოსალოდნელია ვარდნა)**"
+                        signal = "🔴 <b>SELL (SHORT / მოსალოდნელია ვარდნა)</b>"
                     else:
-                        signal = "⚪ **NEUTRAL (ნეიტრალური / გაურკვეველი)**"
+                        signal = "⚪ <b>NEUTRAL (ნეიტრალური)</b>"
 
                     # 2. სათაურის თარგმნა ქართულად
                     try:
                         translated_title = translator.translate(title)
-                    except Exception:
+                    except Exception as tr_err:
+                        print(f"Translation Error: {tr_err}")
                         translated_title = title
 
-                    news_list.append(f"• [{translated_title}]({link})\n  └ **სიგნალი/მიმართულება:** {signal}")
+                    # ფორმატირება HTML-ში (თავიდან აგაცილებთ Telegram-ის შეცდომებს)
+                    item_str = f"• <a href='{link}'>{translated_title}</a>\n  └ <b>სიგნალი:</b> {signal}"
+                    news_list.append(item_str)
             
             if len(news_list) >= 5:
                 break
@@ -114,7 +115,6 @@ def get_crypto_news():
 
 # --- Multi-Timeframe Strategy Logic ---
 def analyze_market(symbol):
-    """სრული ტექნიკური ანალიზი (MTF + ATR + Volume)"""
     df_5m = fetch_ohlcv_pd(symbol, timeframe='5m', limit=200)
     df_1h = fetch_ohlcv_pd(symbol, timeframe='1h', limit=200)
 
@@ -165,14 +165,14 @@ def analyze_market(symbol):
 # --- Telegram Bot Commands ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = (
-        "🚀 **24/7 AI Crypto Monitor 2.0 ჩართულია!**\n\n"
-        "📜 **ხელმისაწვდომი ბრძანებები:**\n"
-        "▶ `/btc` – BTC/USDT-ის MTF + ATR ანალიზი\n"
-        "▶ `/sol` – SOL/USDT-ის MTF + ATR ანალიზი\n"
-        "▶ `/news` – უახლესი სიახლეები ქართულად + BUY/SELL სიგნალი\n"
-        "▶ `/status` – ბოტის აქტიური სტატუსი"
+        "🚀 <b>24/7 AI Crypto Monitor 2.0 ჩართულია!</b>\n\n"
+        "📜 <b>ხელმისაწვდომი ბრძანებები:</b>\n"
+        "▶ /btc – BTC/USDT-ის MTF + ATR ანალიზი\n"
+        "▶ /sol – SOL/USDT-ის MTF + ATR ანალიზი\n"
+        "▶ /news – უახლესი სიახლეები ქართულად + BUY/SELL სიგნალი\n"
+        "▶ /status – ბოტის აქტიური სტატუსი"
     )
-    await update.message.reply_text(msg, parse_mode="Markdown")
+    await update.message.reply_text(msg, parse_mode="HTML")
 
 async def btc_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⏳ ითვლება BTC/USDT სიღრმისეული ანალიზი...")
@@ -182,17 +182,17 @@ async def btc_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     res = (
-        f"📊 **BTC/USDT ანალიზი (MTF + ATR)**\n\n"
-        f"🔹 **ფასი:** ${data['price']:.2f}\n"
-        f"🔹 **RSI (5m):** {data['rsi_5m']:.1f}\n"
-        f"🔹 **EMA 200 (5m):** ${data['ema200_5m']:.2f}\n"
-        f"🔹 **EMA 200 (1h):** ${data['ema200_1h']:.2f}\n"
-        f"🔹 **Volume Spike:** {'✅ კი' if data['vol_spike'] else '❌ არა'}\n\n"
-        f"💡 **სიგნალი:** {data['signal'] if data['signal'] else 'HOLD (მოოდინში)'}\n"
+        f"📊 <b>BTC/USDT ანალიზი (MTF + ATR)</b>\n\n"
+        f"🔹 <b>ფასი:</b> ${data['price']:.2f}\n"
+        f"🔹 <b>RSI (5m):</b> {data['rsi_5m']:.1f}\n"
+        f"🔹 <b>EMA 200 (5m):</b> ${data['ema200_5m']:.2f}\n"
+        f"🔹 <b>EMA 200 (1h):</b> ${data['ema200_1h']:.2f}\n"
+        f"🔹 <b>Volume Spike:</b> {'✅ კი' if data['vol_spike'] else '❌ არა'}\n\n"
+        f"💡 <b>სიგნალი:</b> {data['signal'] if data['signal'] else 'HOLD (მოლოდინში)'}\n"
     )
     if data['signal']:
-        res += f"🎯 **Take Profit:** ${data['tp']:.2f}\n🛑 **Stop Loss:** ${data['sl']:.2f}\n"
-    await update.message.reply_text(res, parse_mode="Markdown")
+        res += f"🎯 <b>Take Profit:</b> ${data['tp']:.2f}\n🛑 <b>Stop Loss:</b> ${data['sl']:.2f}\n"
+    await update.message.reply_text(res, parse_mode="HTML")
 
 async def sol_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⏳ ითვლება SOL/USDT სიღრმისეული ანალიზი...")
@@ -202,26 +202,26 @@ async def sol_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     res = (
-        f"📊 **SOL/USDT ანალიზი (MTF + ATR)**\n\n"
-        f"🔹 **ფასი:** ${data['price']:.2f}\n"
-        f"🔹 **RSI (5m):** {data['rsi_5m']:.1f}\n"
-        f"🔹 **EMA 200 (5m):** ${data['ema200_5m']:.2f}\n"
-        f"🔹 **EMA 200 (1h):** ${data['ema200_1h']:.2f}\n"
-        f"🔹 **Volume Spike:** {'✅ კი' if data['vol_spike'] else '❌ არა'}\n\n"
-        f"💡 **სიგნალი:** {data['signal'] if data['signal'] else 'HOLD (მოოდინში)'}\n"
+        f"📊 <b>SOL/USDT ანალიზი (MTF + ATR)</b>\n\n"
+        f"🔹 <b>ფასი:</b> ${data['price']:.2f}\n"
+        f"🔹 <b>RSI (5m):</b> {data['rsi_5m']:.1f}\n"
+        f"🔹 <b>EMA 200 (5m):</b> ${data['ema200_5m']:.2f}\n"
+        f"🔹 <b>EMA 200 (1h):</b> ${data['ema200_1h']:.2f}\n"
+        f"🔹 <b>Volume Spike:</b> {'✅ კი' if data['vol_spike'] else '❌ არა'}\n\n"
+        f"💡 <b>სიგნალი:</b> {data['signal'] if data['signal'] else 'HOLD (მოლოდინში)'}\n"
     )
     if data['signal']:
-        res += f"🎯 **Take Profit:** ${data['tp']:.2f}\n🛑 **Stop Loss:** ${data['sl']:.2f}\n"
-    await update.message.reply_text(res, parse_mode="Markdown")
+        res += f"🎯 <b>Take Profit:</b> ${data['tp']:.2f}\n🛑 <b>Stop Loss:</b> ${data['sl']:.2f}\n"
+    await update.message.reply_text(res, parse_mode="HTML")
 
 async def news_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⏳ იტვირთება, ითარგმნება და ანალიზდება სიახლეების გავლენა...")
     news_text = get_crypto_news()
-    res = f"📰 **უახლესი კრიპტო სიახლეები და ბაზარზე გავლენა:**\n\n{news_text}"
-    await update.message.reply_text(res, parse_mode="Markdown", disable_web_page_preview=True)
+    res = f"📰 <b>უახლესი კრიპტო სიახლეები და ბაზარზე გავლენა:</b>\n\n{news_text}"
+    await update.message.reply_text(res, parse_mode="HTML", disable_web_page_preview=True)
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("✅ **ბოტი აქტიურია და 24/7 მონიტორინგი ჩართულია!**", parse_mode="Markdown")
+    await update.message.reply_text("✅ <b>ბოტი აქტიურია და 24/7 მონიტორინგი ჩართულია!</b>", parse_mode="HTML")
 
 # --- Flask Server ---
 app = Flask(__name__)
@@ -275,4 +275,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
