@@ -1,8 +1,1 @@
-python-telegram-bot
-ccxt
-pandas
-requests
-flask
-feedparser
-deep-translator
-textblob
+
