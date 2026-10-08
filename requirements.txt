@@ -2,3 +2,4 @@ python-telegram-bot
 ccxt
 flask
 requests
+pandas
