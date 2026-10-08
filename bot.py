@@ -26,7 +26,6 @@ exchange = ccxt.binance({
 
 # --- Helper Functions for Data & Indicators ---
 def fetch_ohlcv_pd(symbol, timeframe='5m', limit=100):
-    """ითვლის OHLCV მონაცემებს და აბრუნებს Pandas DataFrame-ს"""
     try:
         ohlcv = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
@@ -37,7 +36,6 @@ def fetch_ohlcv_pd(symbol, timeframe='5m', limit=100):
         return None
 
 def calculate_indicators(df):
-    """ითვლის EMA200, RSI, ATR და Volume SMA-ს"""
     if df is None or len(df) < 50:
         return df
 
@@ -63,9 +61,9 @@ def calculate_indicators(df):
 
     return df
 
-# --- News Fetcher + Coin Identification + Sentiment Signal ---
+# --- News Fetcher + Accurate Asset Tagging + Sentiment ---
 def get_crypto_news():
-    """იღებს სიახლეებს, ამოიცნობს კრიპტოს (BTC/SOL/GENERAL) და ადგენს BUY/SELL/NEUTRAL სიგნალს"""
+    """იღებს სიახლეებს, ზუსტად მიუთითებს აქტივს (BTC/SOL/ALL CRYPTO) და დებს სიგნალს"""
     rss_urls = [
         "https://www.cryptoglobe.com/latest/feed/",
         "https://www.coindesk.com/arc/outboundfeeds/rss/",
@@ -83,14 +81,20 @@ def get_crypto_news():
                 if title and link:
                     title_lower = title.lower()
                     
-                    # 1. კრიპტოვალუტის ამოცნობა სათაურში
-                    coin_tag = "🌐 ALL CRYPTO"
-                    if 'btc' in title_lower or 'bitcoin' in title_lower:
+                    # აქტივის ზუსტი იდენტიფიკაცია
+                    has_btc = 'btc' in title_lower or 'bitcoin' in title_lower
+                    has_sol = 'sol' in title_lower or 'solana' in title_lower
+                    
+                    if has_btc and has_sol:
+                        coin_tag = "🟡 BTC & 🟣 SOL"
+                    elif has_btc:
                         coin_tag = "🟡 BTC (Bitcoin)"
-                    elif 'sol' in title_lower or 'solana' in title_lower:
+                    elif has_sol:
                         coin_tag = "🟣 SOL (Solana)"
+                    else:
+                        coin_tag = "🌐 ALL CRYPTO (BTC & SOL)"
 
-                    # 2. განწყობის / სიგნალის ანალიზი (TextBlob)
+                    # განწყობის / სიგნალის ანალიზი
                     analysis = TextBlob(title)
                     polarity = analysis.sentiment.polarity
                     
@@ -99,12 +103,12 @@ def get_crypto_news():
                     elif polarity < -0.05:
                         signal = "🔴 **SELL (SHORT / მოსალოდნელია ვარდნა)**"
                     else:
-                        signal = "⚪ **NEUTRAL (ნეიტრალური / გაურკვეველი)**"
+                        signal = "⚪ **NEUTRAL (ნეიტრალური)**"
 
                     news_list.append(
                         f"• [{title}]({link})\n"
                         f"  ├ **აქტივი:** {coin_tag}\n"
-                        f"  └ **სიგნალი/მიმართულება:** {signal}"
+                        f"  └ **სიგნალი:** {signal}"
                     )
             
             if len(news_list) >= 5:
@@ -119,7 +123,6 @@ def get_crypto_news():
 
 # --- Multi-Timeframe Strategy Logic ---
 def analyze_market(symbol):
-    """სრული ტექნიკური ანალიზი (MTF + ATR + Volume)"""
     df_5m = fetch_ohlcv_pd(symbol, timeframe='5m', limit=200)
     df_1h = fetch_ohlcv_pd(symbol, timeframe='1h', limit=200)
 
@@ -174,7 +177,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📜 **ხელმისაწვდომი ბრძანებები:**\n"
         "▶ `/btc` – BTC/USDT-ის MTF + ATR ანალიზი\n"
         "▶ `/sol` – SOL/USDT-ის MTF + ATR ანალიზი\n"
-        "▶ `/news` – უახლესი სიახლეები + BUY/SELL/NEUTRAL სიგნალი\n"
+        "▶ `/news` – სიახლეები + აქტივის იდენტიფიკაცია + BUY/SELL სიგნალი\n"
         "▶ `/status` – ბოტის აქტიური სტატუსი"
     )
     await update.message.reply_text(msg, parse_mode="Markdown")
@@ -220,7 +223,7 @@ async def sol_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(res, parse_mode="Markdown")
 
 async def news_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("⏳ იტვირთება და ანალიზდება სიახლეების გავლენა...")
+    await update.message.reply_text("⏳ იტვირთება, იდენტიფიცირდება და ანალიზდება სიახლეები...")
     news_text = get_crypto_news()
     res = f"📰 **უახლესი კრიპტო სიახლეები და ბაზარზე გავლენა:**\n\n{news_text}"
     await update.message.reply_text(res, parse_mode="Markdown", disable_web_page_preview=True)
