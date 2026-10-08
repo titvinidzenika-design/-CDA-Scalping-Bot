@@ -9,8 +9,8 @@ import feedparser
 from textblob import TextBlob
 from datetime import datetime
 from flask import Flask
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
+from telegram import Update
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 # --- Configuration & Environment Variables ---
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -99,16 +99,17 @@ def get_crypto_news():
                     polarity = analysis.sentiment.polarity
                     
                     if polarity > 0.05:
-                        signal = "🟢 **BUY (LONG / მოსალოდნელია ზრდა)**"
+                        signal = "🟢 BUY (LONG / მოსალოდნელია ზრდა)"
                     elif polarity < -0.05:
-                        signal = "🔴 **SELL (SHORT / მოსალოდნელია ვარდნა)**"
+                        signal = "🔴 SELL (SHORT / მოსალოდნელია ვარდნა)"
                     else:
-                        signal = "⚪ **NEUTRAL (ნეიტრალური)**"
+                        signal = "⚪ NEUTRAL (ნეიტრალური)"
 
                     news_list.append(
-                        f"• [{title}]({link})\n"
-                        f"  ├ **აქტივი:** {coin_tag}\n"
-                        f"  └ **სიგნალი:** {signal}"
+                        f"• {title}\n"
+                        f"  ├ აქტივი: {coin_tag}\n"
+                        f"  └ სიგნალი: {signal}\n"
+                        f"  🔗 {link}"
                     )
             
             if len(news_list) >= 5:
@@ -170,136 +171,74 @@ def analyze_market(symbol):
         'tp': tp
     }
 
-# --- Keyboard Buttons Generator ---
-def get_main_keyboard():
-    keyboard = [
-        [
-            InlineKeyboardButton("📊 BTC ანალიზი", callback_data="cmd_btc"),
-            InlineKeyboardButton("🟣 SOL ანალიზი", callback_data="cmd_sol")
-        ],
-        [
-            InlineKeyboardButton("📰 უახლესი სიახლეები", callback_data="cmd_news"),
-            InlineKeyboardButton("⚡ სტატუსი", callback_data="cmd_status")
-        ]
-    ]
-    return InlineKeyboardMarkup(keyboard)
-
-# --- Telegram Bot Handlers ---
+# --- Telegram Bot Commands ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user_chat_ids.add(chat_id)
+    
+    # ჩვეულებრივი ტექსტი Markdown-ის გარეშე, რომ Telegram-მა პირდაპირ ლინკებად/ბრძანებებად აღიქვას
     msg = (
-        "🚀 **24/7 AI Crypto Monitor 2.0 ჩართულია!**\n\n"
-        "აირჩიეთ სასურველი მოქმედება ქვემოთ მოცემული ღილაკებით:"
+        "🚀 24/7 AI Crypto Monitor ჩართულია!\n\n"
+        "📜 ხელმისაწვდომი ბრძანებები:\n"
+        "▶ /btc – BTC/USDT-ის მომენტალური ანალიზი\n"
+        "▶ /sol – SOL/USDT-ის მომენტალური ანალიზი\n"
+        "▶ /news – უახლესი გლობალური სიახლეები\n"
+        "▶ /status – ბოტის სტატუსის შემოწმება"
     )
-    await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=get_main_keyboard())
+    await update.message.reply_text(msg)
 
-async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    chat_id = query.message.chat_id
-    user_chat_ids.add(chat_id)
-
-    if query.data == "cmd_btc":
-        await query.message.reply_text("⏳ ითვლება BTC/USDT სიღრმისეული ანალიზი...")
-        data = analyze_market("BTC/USDT")
-        if not data:
-            await query.message.reply_text("❌ მონაცემების წამოღება ვერ მოხერხდა.", reply_markup=get_main_keyboard())
-            return
-        
-        res = (
-            f"📊 **BTC/USDT ანალიზი (MTF + ATR)**\n\n"
-            f"🔹 **ფასი:** ${data['price']:.2f}\n"
-            f"🔹 **RSI (5m):** {data['rsi_5m']:.1f}\n"
-            f"🔹 **EMA 200 (5m):** ${data['ema200_5m']:.2f}\n"
-            f"🔹 **EMA 200 (1h):** ${data['ema200_1h']:.2f}\n"
-            f"🔹 **Volume Spike:** {'✅ კი' if data['vol_spike'] else '❌ არა'}\n\n"
-            f"💡 **სიგნალი:** {data['signal'] if data['signal'] else 'HOLD (მოლოდინში)'}\n"
-        )
-        if data['signal']:
-            res += f"🎯 **Take Profit:** ${data['tp']:.2f}\n🛑 **Stop Loss:** ${data['sl']:.2f}\n"
-        await query.message.reply_text(res, parse_mode="Markdown", reply_markup=get_main_keyboard())
-
-    elif query.data == "cmd_sol":
-        await query.message.reply_text("⏳ ითვლება SOL/USDT სიღრმისეული ანალიზი...")
-        data = analyze_market("SOL/USDT")
-        if not data:
-            await query.message.reply_text("❌ მონაცემების წამოღება ვერ მოხერხდა.", reply_markup=get_main_keyboard())
-            return
-
-        res = (
-            f"📊 **SOL/USDT ანალიზი (MTF + ATR)**\n\n"
-            f"🔹 **ფასი:** ${data['price']:.2f}\n"
-            f"🔹 **RSI (5m):** {data['rsi_5m']:.1f}\n"
-            f"🔹 **EMA 200 (5m):** ${data['ema200_5m']:.2f}\n"
-            f"🔹 **EMA 200 (1h):** ${data['ema200_1h']:.2f}\n"
-            f"🔹 **Volume Spike:** {'✅ კი' if data['vol_spike'] else '❌ არა'}\n\n"
-            f"💡 **სიგნალი:** {data['signal'] if data['signal'] else 'HOLD (მოლოდინში)'}\n"
-        )
-        if data['signal']:
-            res += f"🎯 **Take Profit:** ${data['tp']:.2f}\n🛑 **Stop Loss:** ${data['sl']:.2f}\n"
-        await query.message.reply_text(res, parse_mode="Markdown", reply_markup=get_main_keyboard())
-
-    elif query.data == "cmd_news":
-        await query.message.reply_text("⏳ იტვირთება, იდენტიფიცირდება და ანალიზდება სიახლეები...")
-        news_text = get_crypto_news()
-        res = f"📰 **უახლესი კრიპტო სიახლეები და ბაზარზე გავლენა:**\n\n{news_text}"
-        await query.message.reply_text(res, parse_mode="Markdown", disable_web_page_preview=True, reply_markup=get_main_keyboard())
-
-    elif query.data == "cmd_status":
-        await query.message.reply_text("✅ **ბოტი აქტიურია და 24/7 მონიტორინგი ჩართულია!**", parse_mode="Markdown", reply_markup=get_main_keyboard())
-
-# --- Command Handlers ---
 async def btc_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_chat_ids.add(update.effective_chat.id)
-    await update.message.reply_text("⏳ ითვლება BTC/USDT სიღრმისეული ანალიზი...")
+    await update.message.reply_text("⏳ ითვლება BTC/USDT ანალიზი...")
     data = analyze_market("BTC/USDT")
     if not data:
         await update.message.reply_text("❌ მონაცემების წამოღება ვერ მოხერხდა.")
         return
+    
     res = (
-        f"📊 **BTC/USDT ანალიზი (MTF + ATR)**\n\n"
-        f"🔹 **ფასი:** ${data['price']:.2f}\n"
-        f"🔹 **RSI (5m):** {data['rsi_5m']:.1f}\n"
-        f"🔹 **EMA 200 (5m):** ${data['ema200_5m']:.2f}\n"
-        f"🔹 **EMA 200 (1h):** ${data['ema200_1h']:.2f}\n"
-        f"🔹 **Volume Spike:** {'✅ კი' if data['vol_spike'] else '❌ არა'}\n\n"
-        f"💡 **სიგნალი:** {data['signal'] if data['signal'] else 'HOLD (მოლოდინში)'}\n"
+        f"📊 BTC/USDT ანალიზი (MTF + ATR)\n\n"
+        f"🔹 ფასი: ${data['price']:.2f}\n"
+        f"🔹 RSI (5m): {data['rsi_5m']:.1f}\n"
+        f"🔹 EMA 200 (5m): ${data['ema200_5m']:.2f}\n"
+        f"🔹 EMA 200 (1h): ${data['ema200_1h']:.2f}\n"
+        f"🔹 Volume Spike: {'✅ კი' if data['vol_spike'] else '❌ არა'}\n\n"
+        f"💡 სიგნალი: {data['signal'] if data['signal'] else 'HOLD (მოლოდინში)'}\n"
     )
     if data['signal']:
-        res += f"🎯 **Take Profit:** ${data['tp']:.2f}\n🛑 **Stop Loss:** ${data['sl']:.2f}\n"
-    await update.message.reply_text(res, parse_mode="Markdown", reply_markup=get_main_keyboard())
+        res += f"🎯 Take Profit: ${data['tp']:.2f}\n🛑 Stop Loss: ${data['sl']:.2f}\n"
+    await update.message.reply_text(res)
 
 async def sol_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_chat_ids.add(update.effective_chat.id)
-    await update.message.reply_text("⏳ ითვლება SOL/USDT სიღრმისეული ანალიზი...")
+    await update.message.reply_text("⏳ ითვლება SOL/USDT ანალიზი...")
     data = analyze_market("SOL/USDT")
     if not data:
         await update.message.reply_text("❌ მონაცემების წამოღება ვერ მოხერხდა.")
         return
+
     res = (
-        f"📊 **SOL/USDT ანალიზი (MTF + ATR)**\n\n"
-        f"🔹 **ფასი:** ${data['price']:.2f}\n"
-        f"🔹 **RSI (5m):** {data['rsi_5m']:.1f}\n"
-        f"🔹 **EMA 200 (5m):** ${data['ema200_5m']:.2f}\n"
-        f"🔹 **EMA 200 (1h):** ${data['ema200_1h']:.2f}\n"
-        f"🔹 **Volume Spike:** {'✅ კი' if data['vol_spike'] else '❌ არა'}\n\n"
-        f"💡 **სიგნალი:** {data['signal'] if data['signal'] else 'HOLD (მოლოდინში)'}\n"
+        f"📊 SOL/USDT ანალიზი (MTF + ATR)\n\n"
+        f"🔹 ფასი: ${data['price']:.2f}\n"
+        f"🔹 RSI (5m): {data['rsi_5m']:.1f}\n"
+        f"🔹 EMA 200 (5m): ${data['ema200_5m']:.2f}\n"
+        f"🔹 EMA 200 (1h): ${data['ema200_1h']:.2f}\n"
+        f"🔹 Volume Spike: {'✅ კი' if data['vol_spike'] else '❌ არა'}\n\n"
+        f"💡 სიგნალი: {data['signal'] if data['signal'] else 'HOLD (მოლოდინში)'}\n"
     )
     if data['signal']:
-        res += f"🎯 **Take Profit:** ${data['tp']:.2f}\n🛑 **Stop Loss:** ${data['sl']:.2f}\n"
-    await update.message.reply_text(res, parse_mode="Markdown", reply_markup=get_main_keyboard())
+        res += f"🎯 Take Profit: ${data['tp']:.2f}\n🛑 Stop Loss: ${data['sl']:.2f}\n"
+    await update.message.reply_text(res)
 
 async def news_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_chat_ids.add(update.effective_chat.id)
-    await update.message.reply_text("⏳ იტვირთება, იდენტიფიცირდება და ანალიზდება სიახლეები...")
+    await update.message.reply_text("⏳ იტვირთება უახლესი სიახლეები...")
     news_text = get_crypto_news()
-    res = f"📰 **უახლესი კრიპტო სიახლეები და ბაზარზე გავლენა:**\n\n{news_text}"
-    await update.message.reply_text(res, parse_mode="Markdown", disable_web_page_preview=True, reply_markup=get_main_keyboard())
+    res = f"📰 უახლესი კრიპტო სიახლეები და ბაზარზე გავლენა:\n\n{news_text}"
+    await update.message.reply_text(res, disable_web_page_preview=True)
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_chat_ids.add(update.effective_chat.id)
-    await update.message.reply_text("✅ **ბოტი აქტიურია და 24/7 მონიტორინგი ჩართულია!**", parse_mode="Markdown", reply_markup=get_main_keyboard())
+    await update.message.reply_text("✅ სტატუსი: ბოტი აქტიურია და 24/7 მონიტორინგი ჩართულია!")
 
 # --- Flask Server ---
 app = Flask(__name__)
@@ -315,7 +254,7 @@ def run_flask():
 async def send_telegram_alert(tg_app, alert_text):
     for cid in list(user_chat_ids):
         try:
-            await tg_app.bot.send_message(chat_id=cid, text=alert_text, parse_mode="Markdown", reply_markup=get_main_keyboard())
+            await tg_app.bot.send_message(chat_id=cid, text=alert_text)
         except Exception as e:
             print(f"Failed to send alert to {cid}: {e}")
 
@@ -332,11 +271,11 @@ def auto_market_scanner(tg_app):
 
                     last_signal_time[symbol] = now
                     alert_text = (
-                        f"🚨 **ავტომატური სიგნალი: {data['symbol']}**\n\n"
-                        f"💡 **მოქმედება:** {data['signal']}\n"
-                        f"🔹 **მიმდინარე ფასი:** ${data['price']:.2f}\n"
-                        f"🎯 **Take Profit:** ${data['tp']:.2f}\n"
-                        f"🛑 **Stop Loss:** ${data['sl']:.2f}\n"
+                        f"🚨 ავტომატური სიგნალი: {data['symbol']}\n\n"
+                        f"💡 მოქმედება: {data['signal']}\n"
+                        f"🔹 მიმდინარე ფასი: ${data['price']:.2f}\n"
+                        f"🎯 Take Profit: ${data['tp']:.2f}\n"
+                        f"🛑 Stop Loss: ${data['sl']:.2f}\n"
                     )
                     if main_loop:
                         asyncio.run_coroutine_threadsafe(send_telegram_alert(tg_app, alert_text), main_loop)
@@ -362,7 +301,6 @@ def main():
     tg_app.add_handler(CommandHandler("sol", sol_command))
     tg_app.add_handler(CommandHandler("news", news_command))
     tg_app.add_handler(CommandHandler("status", status_command))
-    tg_app.add_handler(CallbackQueryHandler(button_click_handler))
 
     threading.Thread(target=auto_market_scanner, args=(tg_app,), daemon=True).start()
 
