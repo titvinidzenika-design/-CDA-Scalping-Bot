@@ -4,7 +4,7 @@ import threading
 import requests
 import pandas as pd
 import ccxt
-import xml.etree.ElementTree as ET
+import feedparser
 from datetime import datetime
 from flask import Flask
 from telegram import Update
@@ -62,30 +62,33 @@ def calculate_indicators(df):
 
     return df
 
-# --- Free News Fetcher (CoinTelegraph RSS) ---
+# --- Stable Free News Fetcher (Feedparser + Multi-RSS) ---
 def get_crypto_news():
-    """იღებს უახლეს სიახლეებს CoinTelegraph RSS-იდან სრულიად უფასოდ"""
-    url = "https://cointelegraph.com/rss"
-    headers = {'User-Agent': 'Mozilla/5.0'}
-    try:
-        response = requests.get(url, headers=headers, timeout=10)
-        if response.status_code == 200:
-            root = ET.fromstring(response.content)
-            items = root.findall('.//item')
-            
-            news_list = []
-            for item in items[:5]: # იღებს ბოლო 5 სიახლეს
-                title = item.find('title').text if item.find('title') is not None else ""
-                link = item.find('link').text if item.find('link') is not None else ""
-                if title:
+    """იღებს უახლეს სიახლეებს სტაბილური RSS არხებიდან"""
+    rss_urls = [
+        "https://www.cryptoglobe.com/latest/feed/",
+        "https://www.coindesk.com/arc/outboundfeeds/rss/"
+    ]
+    
+    news_list = []
+    
+    for url in rss_urls:
+        try:
+            feed = feedparser.parse(url)
+            for entry in feed.entries[:3]:
+                title = entry.get('title', '')
+                link = entry.get('link', '')
+                if title and link:
                     news_list.append(f"• [{title}]({link})")
-            
-            return "\n\n".join(news_list)
-        else:
-            return "❌ სიახლეების წამოღება ვერ მოხერხდა."
-    except Exception as e:
-        print(f"News RSS error: {e}")
-        return "❌ სიახლეების სერვერთან კავშირი ვერ დამყარდა."
+            if len(news_list) >= 5:
+                break
+        except Exception as e:
+            print(f"Error parsing RSS {url}: {e}")
+
+    if news_list:
+        return "\n\n".join(news_list[:5])
+    else:
+        return "❌ სიახლეების წამოღება ვერ მოხერხდა."
 
 # --- Multi-Timeframe Strategy Logic ---
 def analyze_market(symbol):
@@ -118,12 +121,10 @@ def analyze_market(symbol):
     vol_spike = vol_5m > (vol_sma_5m * 1.3)
 
     # MTF Filter: 5m & 1h Trend Alignment
-    # BUY: Price > EMA200 on 5m AND 1h, RSI < 65, Volume Spike
     if price > ema200_5m and price > ema200_1h and rsi_5m < 65 and vol_spike:
-        if curr_5m['rsi'] > 45: # Momentum direction
+        if curr_5m['rsi'] > 45:
             signal = "BUY (LONG)"
 
-    # SELL: Price < EMA200 on 5m AND 1h, RSI > 35, Volume Spike
     elif price < ema200_5m and price < ema200_1h and rsi_5m > 35 and vol_spike:
         if curr_5m['rsi'] < 55:
             signal = "SELL (SHORT)"
@@ -199,7 +200,7 @@ async def sol_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def news_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⏳ იტვირთება უახლესი კრიპტო სიახლეები...")
     news_text = get_crypto_news()
-    res = f"📰 **უახლესი გლობალური კრიპტო სიახლეები (CoinTelegraph):**\n\n{news_text}"
+    res = f"📰 **უახლესი გლობალური კრიპტო სიახლეები:**\n\n{news_text}"
     await update.message.reply_text(res, parse_mode="Markdown", disable_web_page_preview=True)
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -226,14 +227,13 @@ def auto_market_scanner():
                 data = analyze_market(symbol)
                 if data and data['signal']:
                     now = time.time()
-                    # Cooldown check: 15 mins (900 seconds)
                     if symbol in last_signal_time and (now - last_signal_time[symbol]) < 900:
                         continue
 
                     last_signal_time[symbol] = now
                     print(f"ALERT: {symbol} -> {data['signal']}")
 
-            time.sleep(180) # Check every 3 minutes
+            time.sleep(180)
         except Exception as e:
             print(f"Auto scanner error: {e}")
             time.sleep(60)
