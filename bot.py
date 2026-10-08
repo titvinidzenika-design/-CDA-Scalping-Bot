@@ -5,6 +5,8 @@ import requests
 import pandas as pd
 import ccxt
 import feedparser
+from deep_translator import GoogleTranslator
+from textblob import TextBlob
 from datetime import datetime
 from flask import Flask
 from telegram import Update
@@ -62,15 +64,17 @@ def calculate_indicators(df):
 
     return df
 
-# --- Stable Free News Fetcher (Feedparser + Multi-RSS) ---
+# --- Free News Fetcher + Translation + Sentiment Signal ---
 def get_crypto_news():
-    """იღებს უახლეს სიახლეებს სტაბილური RSS არხებიდან"""
+    """იღებს სიახლეებს, თარგმნის ქართულად და საზღვრავს კონკრეტულ სიგნალს (BUY/SELL/NEUTRAL)"""
     rss_urls = [
         "https://www.cryptoglobe.com/latest/feed/",
-        "https://www.coindesk.com/arc/outboundfeeds/rss/"
+        "https://www.coindesk.com/arc/outboundfeeds/rss/",
+        "https://cointelegraph.com/rss"
     ]
     
     news_list = []
+    translator = GoogleTranslator(source='en', target='ka')
     
     for url in rss_urls:
         try:
@@ -79,7 +83,25 @@ def get_crypto_news():
                 title = entry.get('title', '')
                 link = entry.get('link', '')
                 if title and link:
-                    news_list.append(f"• [{title}]({link})")
+                    # 1. განწყობის / სიგნალის ანალიზი (TextBlob)
+                    analysis = TextBlob(title)
+                    polarity = analysis.sentiment.polarity
+                    
+                    if polarity > 0.05:
+                        signal = "🟢 **BUY (LONG / მოსალოდნელია ზრდა)**"
+                    elif polarity < -0.05:
+                        signal = "🔴 **SELL (SHORT / მოსალოდნელია ვარდნა)**"
+                    else:
+                        signal = "⚪ **NEUTRAL (ნეიტრალური / გაურკვეველი)**"
+
+                    # 2. სათაურის თარგმნა ქართულად
+                    try:
+                        translated_title = translator.translate(title)
+                    except Exception:
+                        translated_title = title
+
+                    news_list.append(f"• [{translated_title}]({link})\n  └ **სიგნალი/მიმართულება:** {signal}")
+            
             if len(news_list) >= 5:
                 break
         except Exception as e:
@@ -114,13 +136,9 @@ def analyze_market(symbol):
 
     ema200_1h = curr_1h['ema200']
 
-    # Signals Setup
     signal = None
-    
-    # Volume Spike Filter (Volume > 1.3 * SMA20)
     vol_spike = vol_5m > (vol_sma_5m * 1.3)
 
-    # MTF Filter: 5m & 1h Trend Alignment
     if price > ema200_5m and price > ema200_1h and rsi_5m < 65 and vol_spike:
         if curr_5m['rsi'] > 45:
             signal = "BUY (LONG)"
@@ -129,7 +147,6 @@ def analyze_market(symbol):
         if curr_5m['rsi'] < 55:
             signal = "SELL (SHORT)"
 
-    # ATR-based Dynamic Stop Loss and Take Profit
     sl = price - (1.5 * atr_5m) if signal == "BUY (LONG)" else price + (1.5 * atr_5m)
     tp = price + (3.0 * atr_5m) if signal == "BUY (LONG)" else price - (3.0 * atr_5m)
 
@@ -148,11 +165,11 @@ def analyze_market(symbol):
 # --- Telegram Bot Commands ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = (
-        "🚀 **24/7 AI Crypto Monitor 2.0 (High Winrate) ჩართულია!**\n\n"
+        "🚀 **24/7 AI Crypto Monitor 2.0 ჩართულია!**\n\n"
         "📜 **ხელმისაწვდომი ბრძანებები:**\n"
         "▶ `/btc` – BTC/USDT-ის MTF + ATR ანალიზი\n"
         "▶ `/sol` – SOL/USDT-ის MTF + ATR ანალიზი\n"
-        "▶ `/news` – უახლესი გლობალური სიახლეები\n"
+        "▶ `/news` – უახლესი სიახლეები ქართულად + BUY/SELL სიგნალი\n"
         "▶ `/status` – ბოტის აქტიური სტატუსი"
     )
     await update.message.reply_text(msg, parse_mode="Markdown")
@@ -198,15 +215,15 @@ async def sol_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(res, parse_mode="Markdown")
 
 async def news_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("⏳ იტვირთება უახლესი კრიპტო სიახლეები...")
+    await update.message.reply_text("⏳ იტვირთება, ითარგმნება და ანალიზდება სიახლეების გავლენა...")
     news_text = get_crypto_news()
-    res = f"📰 **უახლესი გლობალური კრიპტო სიახლეები:**\n\n{news_text}"
+    res = f"📰 **უახლესი კრიპტო სიახლეები და ბაზარზე გავლენა:**\n\n{news_text}"
     await update.message.reply_text(res, parse_mode="Markdown", disable_web_page_preview=True)
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("✅ **ბოტი აქტიურია და 24/7 მონიტორინგი ჩართულია!**", parse_mode="Markdown")
 
-# --- Flask Server for Render Keep-Alive ---
+# --- Flask Server ---
 app = Flask(__name__)
 
 @app.route('/')
@@ -216,11 +233,9 @@ def home():
 def run_flask():
     app.run(host='0.0.0.0', port=PORT)
 
-# --- 24/7 Automated Signal Monitoring Loop ---
+# --- Automated Scanner ---
 def auto_market_scanner():
-    """ყოველი 3 წუთის ინტერვალით ამოწმებს ბაზარს"""
     symbols = ["BTC/USDT", "SOL/USDT"]
-    
     while True:
         try:
             for symbol in symbols:
@@ -244,11 +259,9 @@ def main():
         print("Error: TELEGRAM_BOT_TOKEN environment variable is missing!")
         return
 
-    # Start Web Server in Background
     threading.Thread(target=run_flask, daemon=True).start()
     threading.Thread(target=auto_market_scanner, daemon=True).start()
 
-    # Telegram Application Setup
     tg_app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
 
     tg_app.add_handler(CommandHandler("start", start_command))
