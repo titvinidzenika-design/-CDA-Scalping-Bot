@@ -29,3 +29,4 @@ async def news_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     news_text = get_crypto_news()
     res = f"📰 **უახლესი გლობალური კრიპტო სიახლეები:**\n\n{news_text}"
     await update.message.reply_text(res, parse_mode="Markdown", disable_web_page_preview=True)
+
