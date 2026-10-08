@@ -1,5 +1,3 @@
 python-telegram-bot
 ccxt
-pandas
-pandas-ta
 flask
