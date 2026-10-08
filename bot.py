@@ -2,13 +2,11 @@ import os
 import asyncio
 import threading
 import ccxt
-import pandas as pd
-import pandas_ta as ta
 from flask import Flask
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-# 1. Flask სერვერი Render-ისთვის
+# Flask სერვერი Render-ის პორტისთვის
 app_flask = Flask(__name__)
 
 @app_flask.route('/')
@@ -19,52 +17,42 @@ def run_flask():
     port = int(os.environ.get("PORT", 10000))
     app_flask.run(host="0.0.0.0", port=port)
 
-# 2. Telegram & Exchange პარამეტრები
+# Telegram & Exchange
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CHAT_ID = None
-
 exchange = ccxt.binance()
 SYMBOLS = ['BTC/USDT', 'SOL/USDT']
 
-# 3. ანალიზის ფუნქცია
 def analyze_market(symbol):
     try:
-        ohlcv = exchange.fetch_ohlcv(symbol, timeframe='5m', limit=100)
-        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        
-        df['RSI'] = ta.rsi(df['close'], length=14)
-        df['EMA_20'] = ta.ema(df['close'], length=20)
-        df['ATR'] = ta.atr(df['high'], df['low'], df['close'], length=14)
+        ohlcv = exchange.fetch_ohlcv(symbol, timeframe='5m', limit=20)
+        closes = [x[4] for x in ohlcv]
+        if not closes:
+            return None
 
-        last_row = df.iloc[-1]
-        close_price = last_row['close']
-        rsi = last_row['RSI']
-        ema_20 = last_row['EMA_20']
-        atr = last_row['ATR']
+        current_price = closes[-1]
+        avg_price = sum(closes) / len(closes)
 
-        if rsi < 35 and close_price > ema_20:
+        if current_price > avg_price * 1.005:
             return {
-                'type': '🟢 LONG',
+                'type': '🟢 LONG (ზრდის სიგნალი)',
                 'symbol': symbol,
-                'price': close_price,
-                'sl': round(close_price - (atr * 1.5), 2),
-                'tp': round(close_price + (atr * 3.0), 2),
-                'rsi': round(rsi, 2)
+                'price': current_price,
+                'sl': round(current_price * 0.99, 2),
+                'tp': round(current_price * 1.02, 2)
             }
-        elif rsi > 65 and close_price < ema_20:
+        elif current_price < avg_price * 0.995:
             return {
-                'type': '🔴 SHORT',
+                'type': '🔴 SHORT (კლების სიგნალი)',
                 'symbol': symbol,
-                'price': close_price,
-                'sl': round(close_price + (atr * 1.5), 2),
-                'tp': round(close_price - (atr * 3.0), 2),
-                'rsi': round(rsi, 2)
+                'price': current_price,
+                'sl': round(current_price * 1.01, 2),
+                'tp': round(current_price * 0.98, 2)
             }
     except Exception as e:
         print(f"Error analyzing {symbol}: {e}")
     return None
 
-# 4. ფონური მონიტორინგი
 async def market_monitor(app):
     global CHAT_ID
     while True:
@@ -75,9 +63,8 @@ async def market_monitor(app):
                     msg = (
                         f"🚨 **SCALPING ALERT ({signal['symbol']})**\n\n"
                         f"📊 **მიმართულება:** {signal['type']}\n"
-                        f"💵 **ფასი:** ${signal['price']}\n"
-                        f"🛑 **SL:** ${signal['sl']} | 🎯 **TP:** ${signal['tp']}\n"
-                        f"📉 **RSI:** {signal['rsi']}"
+                        f"💵 **მიმდინარე ფასი:** ${signal['price']}\n"
+                        f"🛑 **SL:** ${signal['sl']} | 🎯 **TP:** ${signal['tp']}"
                     )
                     await app.bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode='Markdown')
         await asyncio.sleep(60)
@@ -85,13 +72,12 @@ async def market_monitor(app):
 async def post_init(app):
     asyncio.create_task(market_monitor(app))
 
-# 5. /start ბრძანების დამუშავება
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global CHAT_ID
     CHAT_ID = update.effective_chat.id
     await update.message.reply_text(
         "გამარჯობა! 👋\n"
-        "BTC და SOL სკალპინგის მონიტორინგი ჩაირთო.\n"
+        "BTC და SOL სკალპინგის მონიტორინგი წარმატებით ჩაირთო.\n"
         "სიგნალის გამოჩენისთანავე მიიღებთ შეტყობინებას."
     )
 
@@ -99,10 +85,8 @@ def main():
     if not TOKEN:
         raise RuntimeError("TELEGRAM_BOT_TOKEN არ არის მითითებული!")
 
-    # Flask გაშვება
     threading.Thread(target=run_flask, daemon=True).start()
 
-    # Application აწყობა
     app = ApplicationBuilder().token(TOKEN).post_init(post_init).build()
     app.add_handler(CommandHandler("start", start))
     app.run_polling()
