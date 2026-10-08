@@ -13,7 +13,7 @@ def main():
 
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    
+
     # run_polling ავტომატურად აგვარებს event loop-ის პრობლემას
     app.run_polling()
 
