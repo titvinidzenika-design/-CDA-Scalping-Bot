@@ -1,5 +1,7 @@
 import os
+import time
 import asyncio
+import threading
 import requests
 import pandas as pd
 import ccxt
@@ -7,15 +9,17 @@ from flask import Flask
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-# --- Configuration ---
+# --- Environment Variables ---
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 PORT = int(os.getenv("PORT", "10000"))
 
+# CCXT Binance
 exchange = ccxt.binance({
     'enableRateLimit': True,
     'options': {'defaultType': 'spot'}
 })
 
+# --- Market Analysis ---
 def fetch_and_analyze(symbol):
     try:
         ohlcv_5m = exchange.fetch_ohlcv(symbol, timeframe='5m', limit=100)
@@ -97,11 +101,9 @@ def fetch_and_analyze(symbol):
         print(f"Error analyzing {symbol}: {e}")
         return None
 
-# --- Telegram Command Handlers ---
+# --- Telegram Handlers ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    context.bot_data['active_chat_id'] = chat_id
-    
+    context.bot_data['active_chat_id'] = update.effective_chat.id
     msg = (
         "🚀 <b>24/7 AI Crypto Monitor ჩართულია!</b>\n\n"
         "🟢 ბოტი ავტომატურად გაგიფრთხილებთ სავაჭრო სიგნალების დროს.\n"
@@ -119,7 +121,7 @@ async def btc_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not data:
         await update.message.reply_text("❌ მონაცემების მიღების შეცდომა.")
         return
-    await send_analysis_message(update.effective_chat.id, context, data)
+    await send_analysis(update.effective_chat.id, context, data)
 
 async def sol_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⏳ ითვლება SOL/USDT...")
@@ -127,12 +129,12 @@ async def sol_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not data:
         await update.message.reply_text("❌ მონაცემების მიღების შეცდომა.")
         return
-    await send_analysis_message(update.effective_chat.id, context, data)
+    await send_analysis(update.effective_chat.id, context, data)
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("✅ <b>ბოტი აქტიურია და მუშაობს 24/7 რეჟიმში!</b>", parse_mode="HTML")
 
-async def send_analysis_message(chat_id, context, data):
+async def send_analysis(chat_id, context, data):
     msg = (
         f"📊 <b>{data['symbol']} ტექნიკური ანალიზი</b>\n\n"
         f"🔹 <b>მიმდინარე ფასი:</b> ${data['price']:.2f}\n"
@@ -150,38 +152,15 @@ async def send_analysis_message(chat_id, context, data):
         )
     await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode="HTML")
 
-async def hourly_loop(app):
-    while True:
-        await asyncio.sleep(3600)
-        chat_id = app.bot_data.get('active_chat_id')
-        if not chat_id:
-            continue
+# --- Flask Server (Render Port Binding) ---
+app = Flask(__name__)
 
-        symbols = ["BTC/USDT", "SOL/USDT"]
-        signals_found = []
+@app.route('/')
+def home():
+    return "Crypto Scalping Bot is Alive!"
 
-        for sym in symbols:
-            data = fetch_and_analyze(sym)
-            if data and data['signal']:
-                signals_found.append(data)
-
-        if signals_found:
-            for data in signals_found:
-                await app.bot.send_message(chat_id=chat_id, text=f"🚨 <b>ახალი სიგნალი!</b>\n{data['symbol']}: {data['signal']}", parse_mode="HTML")
-        else:
-            btc_data = fetch_and_analyze("BTC/USDT")
-            sol_data = fetch_and_analyze("SOL/USDT")
-            btc_price = f"${btc_data['price']:.2f}" if btc_data else "N/A"
-            sol_price = f"${sol_data['price']:.2f}" if sol_data else "N/A"
-
-            ping_msg = (
-                f"⏰ <b>საათობრივი მონიტორინგი (სიგნალი არ არის)</b>\n\n"
-                f"🟢 <b>კოდი მუშაობს 24/7!</b>\n"
-                f"• BTC/USDT: {btc_price} | NEUTRAL\n"
-                f"• SOL/USDT: {sol_price} | NEUTRAL\n\n"
-                f"<i>ბოტი აგრძელებს ბაზრის სკანირებას!</i>"
-            )
-            await app.bot.send_message(chat_id=chat_id, text=ping_msg, parse_mode="HTML")
+def run_flask():
+    app.run(host='0.0.0.0', port=PORT, debug=False, use_reloader=False)
 
 def reset_webhook():
     if TELEGRAM_BOT_TOKEN:
@@ -190,13 +169,18 @@ def reset_webhook():
         except Exception as e:
             print(f"Webhook reset error: {e}")
 
-async def main():
+# --- Main Entry Point ---
+def main():
     if not TELEGRAM_BOT_TOKEN:
         print("Error: TELEGRAM_BOT_TOKEN environment variable is missing!")
         return
 
     reset_webhook()
 
+    # Flask სერვერის გაშვება ცალკე თრედში Render-ისთვის
+    threading.Thread(target=run_flask, daemon=True).start()
+
+    # Telegram Bot-ის სტანდარტული გაშვება
     tg_app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
 
     tg_app.add_handler(CommandHandler("start", start_command))
@@ -204,14 +188,8 @@ async def main():
     tg_app.add_handler(CommandHandler("sol", sol_command))
     tg_app.add_handler(CommandHandler("status", status_command))
 
-    asyncio.create_task(hourly_loop(tg_app))
-
-    print("Bot started via Async Engine...")
-    async with tg_app:
-        await tg_app.start()
-        await tg_app.updater.start_polling(drop_pending_updates=True)
-        while True:
-            await asyncio.sleep(3600)
+    print("Bot is up and listening for commands...")
+    tg_app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
