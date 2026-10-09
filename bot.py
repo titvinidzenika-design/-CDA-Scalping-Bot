@@ -8,20 +8,50 @@ from textblob import TextBlob
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-# --- Configuration & Environment Variables ---
+# --- Configuration ---
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
-# Cooldown Tracker & Chat ID Storage
 last_signal_time = {}
 user_chat_ids = set()
 
-# --- CCXT Exchange Setup ---
 exchange = ccxt.binance({
     'enableRateLimit': True,
     'options': {'defaultType': 'spot'}
 })
 
-# --- Helper Functions for Data & Indicators ---
+# --- News Analysis (Global Headlines Only) ---
+def get_global_news_summary():
+    rss_urls = [
+        "https://www.cryptoglobe.com/latest/feed/",
+        "https://www.coindesk.com/arc/outboundfeeds/rss/",
+        "https://cointelegraph.com/rss"
+    ]
+    
+    news_lines = []
+    for url in rss_urls:
+        try:
+            feed = feedparser.parse(url)
+            for entry in feed.entries[:3]:
+                title = entry.get('title', '').strip()
+                if title:
+                    polarity = TextBlob(title).sentiment.polarity
+                    
+                    if polarity > 0.05:
+                        signal = "🟢 BUY"
+                    elif polarity < -0.05:
+                        signal = "🔴 SELL"
+                    else:
+                        signal = "⚪ NEUTRAL"
+
+                    news_lines.append(f"• {title}\n  └ სიგნალი: {signal}")
+            if len(news_lines) >= 5:
+                break
+        except Exception as e:
+            print(f"Error parsing RSS {url}: {e}")
+
+    return "\n\n".join(news_lines[:5]) if news_lines else "❌ სიახლეების წამოღება ვერ მოხერხდა."
+
+# --- Candlestick Patterns & Indicators ---
 def fetch_ohlcv_pd(symbol, timeframe='5m', limit=100):
     try:
         ohlcv = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
@@ -29,257 +59,202 @@ def fetch_ohlcv_pd(symbol, timeframe='5m', limit=100):
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
         return df
     except Exception as e:
-        print(f"Error fetching OHLCV for {symbol} ({timeframe}): {e}")
+        print(f"Error fetching OHLCV for {symbol}: {e}")
         return None
+
+def detect_candlestick_patterns(df):
+    if len(df) < 2:
+        return "אין პატერნი"
+    
+    curr = df.iloc[-1]
+    prev = df.iloc[-2]
+    
+    body_curr = abs(curr['close'] - curr['open'])
+    range_curr = curr['high'] - curr['low']
+    
+    if range_curr == 0:
+        return "⚪ ნეიტრალური"
+
+    patterns = []
+    
+    # Engulfing
+    if prev['close'] < prev['open'] and curr['close'] > curr['open']:
+        if curr['close'] >= prev['open'] and curr['open'] <= prev['close']:
+            patterns.append("🟢 Bullish Engulfing")
+            
+    if prev['close'] > prev['open'] and curr['close'] < curr['open']:
+        if curr['close'] <= prev['open'] and curr['open'] >= prev['close']:
+            patterns.append("🔴 Bearish Engulfing")
+            
+    # Hammer / Shooting Star
+    lower_wick = min(curr['open'], curr['close']) - curr['low']
+    upper_wick = curr['high'] - max(curr['open'], curr['close'])
+    
+    if lower_wick >= (2 * body_curr) and upper_wick <= (body_curr * 0.5):
+        patterns.append("🔨 Hammer")
+        
+    if upper_wick >= (2 * body_curr) and lower_wick <= (body_curr * 0.5):
+        patterns.append("🌠 Shooting Star")
+
+    if body_curr <= (range_curr * 0.1):
+        patterns.append("⚖️ Doji")
+
+    return ", ".join(patterns) if patterns else "🔍 სტანდარტული სანთელი"
 
 def calculate_indicators(df):
     if df is None or len(df) < 50:
         return df
 
-    # EMA 200
     df['ema200'] = df['close'].ewm(span=200, adjust=False).mean()
 
-    # RSI 14
     delta = df['close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
     rs = gain / loss
     df['rsi'] = 100 - (100 / (1 + rs))
 
-    # ATR 14
     high_low = df['high'] - df['low']
     high_close = (df['high'] - df['close'].shift()).abs()
     low_close = (df['low'] - df['close'].shift()).abs()
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
     df['atr'] = tr.rolling(window=14).mean()
 
-    # Volume SMA 20
-    df['vol_sma20'] = df['volume'].rolling(window=20).mean()
-
     return df
 
-# --- News Fetcher ---
-def get_crypto_news():
-    rss_urls = [
-        "https://www.cryptoglobe.com/latest/feed/",
-        "https://www.coindesk.com/arc/outboundfeeds/rss/",
-        "https://cointelegraph.com/rss"
-    ]
-    
-    news_list = []
-    for url in rss_urls:
-        try:
-            feed = feedparser.parse(url)
-            for entry in feed.entries[:3]:
-                title = entry.get('title', '')
-                link = entry.get('link', '')
-                if title and link:
-                    title_lower = title.lower()
-                    has_btc = 'btc' in title_lower or 'bitcoin' in title_lower
-                    has_sol = 'sol' in title_lower or 'solana' in title_lower
-                    
-                    if has_btc and has_sol:
-                        coin_tag = "🟡 BTC & 🟣 SOL"
-                    elif has_btc:
-                        coin_tag = "🟡 BTC (Bitcoin)"
-                    elif has_sol:
-                        coin_tag = "🟣 SOL (Solana)"
-                    else:
-                        coin_tag = "🌐 ALL CRYPTO (BTC & SOL)"
-
-                    analysis = TextBlob(title)
-                    polarity = analysis.sentiment.polarity
-                    
-                    if polarity > 0.05:
-                        signal = "🟢 BUY (LONG / მოსალოდნელია ზრდა)"
-                    elif polarity < -0.05:
-                        signal = "🔴 SELL (SHORT / მოსალოდნელია ვარდნა)"
-                    else:
-                        signal = "⚪ NEUTRAL (ნეიტრალური)"
-
-                    news_list.append(
-                        f"• {title}\n"
-                        f"  ├ აქტივი: {coin_tag}\n"
-                        f"  └ სიგნალი: {signal}\n"
-                        f"  🔗 {link}"
-                    )
-            if len(news_list) >= 5:
-                break
-        except Exception as e:
-            print(f"Error parsing RSS {url}: {e}")
-
-    if news_list:
-        return "\n\n".join(news_list[:5])
-    else:
-        return "❌ სიახლეების წამოღება ვერ მოხერხდა."
-
-# --- Multi-Timeframe Strategy Logic ---
 def analyze_market(symbol):
-    df_5m = fetch_ohlcv_pd(symbol, timeframe='5m', limit=200)
-    df_1h = fetch_ohlcv_pd(symbol, timeframe='1h', limit=200)
-
-    if df_5m is None or df_1h is None:
+    df = fetch_ohlcv_pd(symbol, timeframe='5m', limit=100)
+    if df is None:
         return None
 
-    df_5m = calculate_indicators(df_5m)
-    df_1h = calculate_indicators(df_1h)
+    df = calculate_indicators(df)
+    pattern = detect_candlestick_patterns(df)
+    curr = df.iloc[-1]
 
-    curr_5m = df_5m.iloc[-1]
-    curr_1h = df_1h.iloc[-1]
-
-    price = curr_5m['close']
-    ema200_5m = curr_5m['ema200']
-    rsi_5m = curr_5m['rsi']
-    atr_5m = curr_5m['atr']
-    vol_5m = curr_5m['volume']
-    vol_sma_5m = curr_5m['vol_sma20']
-
-    ema200_1h = curr_1h['ema200']
+    price = curr['close']
+    ema200 = curr['ema200']
+    rsi = curr['rsi']
+    atr = curr['atr']
 
     signal = None
-    vol_spike = vol_5m > (vol_sma_5m * 1.3)
+    if price > ema200 and rsi < 65:
+        signal = "BUY (LONG)"
+    elif price < ema200 and rsi > 35:
+        signal = "SELL (SHORT)"
 
-    if price > ema200_5m and price > ema200_1h and rsi_5m < 65 and vol_spike:
-        if curr_5m['rsi'] > 45:
-            signal = "BUY (LONG)"
-
-    elif price < ema200_5m and price < ema200_1h and rsi_5m > 35 and vol_spike:
-        if curr_5m['rsi'] < 55:
-            signal = "SELL (SHORT)"
-
-    sl = price - (1.5 * atr_5m) if signal == "BUY (LONG)" else price + (1.5 * atr_5m)
-    tp = price + (3.0 * atr_5m) if signal == "BUY (LONG)" else price - (3.0 * atr_5m)
+    sl = price - (1.5 * atr) if signal == "BUY (LONG)" else price + (1.5 * atr)
+    tp = price + (3.0 * atr) if signal == "BUY (LONG)" else price - (3.0 * atr)
 
     return {
         'symbol': symbol,
         'price': price,
-        'rsi_5m': rsi_5m,
-        'ema200_5m': ema200_5m,
-        'ema200_1h': ema200_1h,
-        'vol_spike': vol_spike,
+        'rsi': rsi,
+        'ema200': ema200,
+        'pattern': pattern,
         'signal': signal,
         'sl': sl,
         'tp': tp
     }
 
-# --- Telegram Bot Commands ---
+# --- Telegram Handlers ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user_chat_ids.add(chat_id)
-    
-    msg = (
-        "🚀 24/7 AI Crypto Monitor ჩართულია!\n\n"
-        "📜 ხელმისაწვდომი ბრძანებები:\n"
-        "/btc – BTC/USDT-ის მომენტალური ანალიზი\n"
-        "/sol – SOL/USDT-ის მომენტალური ანალიზი\n"
-        "/news – უახლესი გლობალური სიახლეები\n"
-        "/status – ბოტის სტატუსის შემოწმება"
-    )
-    await update.message.reply_text(msg)
+    await update.message.reply_text("🚀 Crypto Bot აქტიურია!\n\nბრძანებები:\n/btc\n/sol\n/news\n/status")
 
 async def btc_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_chat_ids.add(update.effective_chat.id)
-    await update.message.reply_text("⏳ ითვლება BTC/USDT ანალიზი...")
     data = analyze_market("BTC/USDT")
     if not data:
-        await update.message.reply_text("❌ მონაცემების წამოღება ვერ მოხერხდა.")
+        await update.message.reply_text("❌ შეცდომა მონაცემების წამოღებისას.")
         return
-    
     res = (
-        f"📊 BTC/USDT ანალიზი (MTF + ATR)\n\n"
+        f"📊 BTC/USDT ანალიზი\n\n"
         f"🔹 ფასი: ${data['price']:.2f}\n"
-        f"🔹 RSI (5m): {data['rsi_5m']:.1f}\n"
-        f"🔹 EMA 200 (5m): ${data['ema200_5m']:.2f}\n"
-        f"🔹 EMA 200 (1h): ${data['ema200_1h']:.2f}\n"
-        f"🔹 Volume Spike: {'✅ კი' if data['vol_spike'] else '❌ არა'}\n\n"
-        f"💡 სიგნალი: {data['signal'] if data['signal'] else 'HOLD (მოლოდინში)'}\n"
+        f"🔹 RSI: {data['rsi']:.1f}\n"
+        f"🔹 EMA200: ${data['ema200']:.2f}\n"
+        f"🕯 პატერნი: {data['pattern']}\n\n"
+        f"💡 სიგნალი: {data['signal'] if data['signal'] else 'HOLD'}\n"
     )
     if data['signal']:
-        res += f"🎯 Take Profit: ${data['tp']:.2f}\n🛑 Stop Loss: ${data['sl']:.2f}\n"
+        res += f"🎯 TP: ${data['tp']:.2f} | 🛑 SL: ${data['sl']:.2f}"
     await update.message.reply_text(res)
 
 async def sol_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_chat_ids.add(update.effective_chat.id)
-    await update.message.reply_text("⏳ ითვლება SOL/USDT ანალიზი...")
     data = analyze_market("SOL/USDT")
     if not data:
-        await update.message.reply_text("❌ მონაცემების წამოღება ვერ მოხერხდა.")
+        await update.message.reply_text("❌ შეცდომა მონაცემების წამოღებისას.")
         return
-
     res = (
-        f"📊 SOL/USDT ანალიზი (MTF + ATR)\n\n"
+        f"📊 SOL/USDT ანალიზი\n\n"
         f"🔹 ფასი: ${data['price']:.2f}\n"
-        f"🔹 RSI (5m): {data['rsi_5m']:.1f}\n"
-        f"🔹 EMA 200 (5m): ${data['ema200_5m']:.2f}\n"
-        f"🔹 EMA 200 (1h): ${data['ema200_1h']:.2f}\n"
-        f"🔹 Volume Spike: {'✅ კი' if data['vol_spike'] else '❌ არა'}\n\n"
-        f"💡 სიგნალი: {data['signal'] if data['signal'] else 'HOLD (მოლოდინში)'}\n"
+        f"🔹 RSI: {data['rsi']:.1f}\n"
+        f"🔹 EMA200: ${data['ema200']:.2f}\n"
+        f"🕯 პატერნი: {data['pattern']}\n\n"
+        f"💡 სიგნალი: {data['signal'] if data['signal'] else 'HOLD'}\n"
     )
     if data['signal']:
-        res += f"🎯 Take Profit: ${data['tp']:.2f}\n🛑 Stop Loss: ${data['sl']:.2f}\n"
+        res += f"🎯 TP: ${data['tp']:.2f} | 🛑 SL: ${data['sl']:.2f}"
     await update.message.reply_text(res)
 
 async def news_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_chat_ids.add(update.effective_chat.id)
-    await update.message.reply_text("⏳ იტვირთება უახლესი სიახლეები...")
-    news_text = get_crypto_news()
-    res = f"📰 უახლესი კრიპტო სიახლეები და ბაზარზე გავლენა:\n\n{news_text}"
-    await update.message.reply_text(res, disable_web_page_preview=True)
+    await update.message.reply_text("⏳ იტვირთება გლობალური სიახლეები...")
+    news_text = get_global_news_summary()
+    await update.message.reply_text(f"📰 გლობალური სიახლეები & სიგნალები:\n\n{news_text}")
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_chat_ids.add(update.effective_chat.id)
-    await update.message.reply_text("✅ სტატუსი: ბოტი აქტიურია და 24/7 მონიტორინგი ჩართულია!")
+    await update.message.reply_text("✅ ბოტი მუშაობს!")
 
-# --- Background Scanner Task ---
+# --- Background Task ---
 async def market_scanner_loop(app):
     await asyncio.sleep(5)
     while True:
         try:
-            symbols = ["BTC/USDT", "SOL/USDT"]
-            for symbol in symbols:
+            for symbol in ["BTC/USDT", "SOL/USDT"]:
                 data = analyze_market(symbol)
                 if data and data['signal']:
                     now = time.time()
                     if symbol in last_signal_time and (now - last_signal_time[symbol]) < 900:
                         continue
-
                     last_signal_time[symbol] = now
-                    alert_text = (
-                        f"🚨 ავტომატური სიგნალი: {data['symbol']}\n\n"
-                        f"💡 მოქმედება: {data['signal']}\n"
-                        f"🔹 მიმდინარე ფასი: ${data['price']:.2f}\n"
-                        f"🎯 Take Profit: ${data['tp']:.2f}\n"
-                        f"🛑 Stop Loss: ${data['sl']:.2f}\n"
+                    
+                    alert = (
+                        f"🚨 ავტომატური სიგნალი: {data['symbol']}\n"
+                        f"💡 {data['signal']}\n"
+                        f"🕯 {data['pattern']}\n"
+                        f"🔹 ფასი: ${data['price']:.2f}\n"
+                        f"🎯 TP: ${data['tp']:.2f} | 🛑 SL: ${data['sl']:.2f}"
                     )
                     for cid in list(user_chat_ids):
                         try:
-                            await app.bot.send_message(chat_id=cid, text=alert_text)
-                        except Exception as e:
-                            print(f"Failed to send alert: {e}")
+                            await app.bot.send_message(chat_id=cid, text=alert)
+                        except Exception:
+                            pass
         except Exception as e:
-            print(f"Error in scanner loop: {e}")
-        
-        await asyncio.sleep(180) # Check every 3 minutes
+            print(f"Scanner error: {e}")
+        await asyncio.sleep(180)
 
 async def post_init(app):
     asyncio.create_task(market_scanner_loop(app))
 
-# --- Main Application ---
+# --- Entry Point ---
 def main():
     if not TELEGRAM_BOT_TOKEN:
-        print("Error: TELEGRAM_BOT_TOKEN missing!")
+        print("TELEGRAM_BOT_TOKEN missing!")
         return
 
-    tg_app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).build()
+    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).build()
 
-    tg_app.add_handler(CommandHandler("start", start_command))
-    tg_app.add_handler(CommandHandler("btc", btc_command))
-    tg_app.add_handler(CommandHandler("sol", sol_command))
-    tg_app.add_handler(CommandHandler("news", news_command))
-    tg_app.add_handler(CommandHandler("status", status_command))
+    app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(CommandHandler("btc", btc_command))
+    app.add_handler(CommandHandler("sol", sol_command))
+    app.add_handler(CommandHandler("news", news_command))
+    app.add_handler(CommandHandler("status", status_command))
 
-    print("Bot is starting...")
-    tg_app.run_polling()
+    print("Bot starting...")
+    app.run_polling()
 
 if __name__ == "__main__":
     main()
