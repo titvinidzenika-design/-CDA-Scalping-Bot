@@ -1,8 +1,6 @@
 import os
 import time
 import threading
-import requests
-import asyncio
 import pandas as pd
 import ccxt
 import feedparser
@@ -19,7 +17,6 @@ PORT = int(os.getenv("PORT", "10000"))
 # Cooldown Tracker & Chat ID Storage
 last_signal_time = {}
 user_chat_ids = set()
-main_loop = None
 
 # --- CCXT Exchange Setup ---
 exchange = ccxt.binance({
@@ -176,7 +173,6 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user_chat_ids.add(chat_id)
     
-    # ჩვეულებრივი ტექსტი Markdown-ის გარეშე, რომ Telegram-მა პირდაპირ ლინკებად/ბრძანებებად აღიქვას
     msg = (
         "🚀 24/7 AI Crypto Monitor ჩართულია!\n\n"
         "📜 ხელმისაწვდომი ბრძანებები:\n"
@@ -250,62 +246,58 @@ def home():
 def run_flask():
     app.run(host='0.0.0.0', port=PORT)
 
-# --- Automated Scanner with Auto Telegram Push ---
-async def send_telegram_alert(tg_app, alert_text):
-    for cid in list(user_chat_ids):
-        try:
-            await tg_app.bot.send_message(chat_id=cid, text=alert_text)
-        except Exception as e:
-            print(f"Failed to send alert to {cid}: {e}")
-
-def auto_market_scanner(tg_app):
+# --- Automated Background Job inside Telegram Application ---
+async def auto_market_scanner_job(context: ContextTypes.DEFAULT_TYPE):
     symbols = ["BTC/USDT", "SOL/USDT"]
-    while True:
+    for symbol in symbols:
         try:
-            for symbol in symbols:
-                data = analyze_market(symbol)
-                if data and data['signal']:
-                    now = time.time()
-                    if symbol in last_signal_time and (now - last_signal_time[symbol]) < 900:
-                        continue
+            data = analyze_market(symbol)
+            if data and data['signal']:
+                now = time.time()
+                if symbol in last_signal_time and (now - last_signal_time[symbol]) < 900:
+                    continue
 
-                    last_signal_time[symbol] = now
-                    alert_text = (
-                        f"🚨 ავტომატური სიგნალი: {data['symbol']}\n\n"
-                        f"💡 მოქმედება: {data['signal']}\n"
-                        f"🔹 მიმდინარე ფასი: ${data['price']:.2f}\n"
-                        f"🎯 Take Profit: ${data['tp']:.2f}\n"
-                        f"🛑 Stop Loss: ${data['sl']:.2f}\n"
-                    )
-                    if main_loop:
-                        asyncio.run_coroutine_threadsafe(send_telegram_alert(tg_app, alert_text), main_loop)
-
-            time.sleep(180)
+                last_signal_time[symbol] = now
+                alert_text = (
+                    f"🚨 ავტომატური სიგნალი: {data['symbol']}\n\n"
+                    f"💡 მოქმედება: {data['signal']}\n"
+                    f"🔹 მიმდინარე ფასი: ${data['price']:.2f}\n"
+                    f"🎯 Take Profit: ${data['tp']:.2f}\n"
+                    f"🛑 Stop Loss: ${data['sl']:.2f}\n"
+                )
+                for cid in list(user_chat_ids):
+                    try:
+                        await context.bot.send_message(chat_id=cid, text=alert_text)
+                    except Exception as e:
+                        print(f"Alert push failed for {cid}: {e}")
         except Exception as e:
-            print(f"Auto scanner error: {e}")
-            time.sleep(60)
+            print(f"Error scanning {symbol}: {e}")
 
 # --- Main Application Start ---
 def main():
-    global main_loop
     if not TELEGRAM_BOT_TOKEN:
         print("Error: TELEGRAM_BOT_TOKEN environment variable is missing!")
         return
 
+    # Flask-ის გაშვება ცალკე Thread-ში
     threading.Thread(target=run_flask, daemon=True).start()
 
+    # Telegram Bot-ის ინიციალიზაცია
     tg_app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
 
+    # ბრძანებების დამატება
     tg_app.add_handler(CommandHandler("start", start_command))
     tg_app.add_handler(CommandHandler("btc", btc_command))
     tg_app.add_handler(CommandHandler("sol", sol_command))
     tg_app.add_handler(CommandHandler("news", news_command))
     tg_app.add_handler(CommandHandler("status", status_command))
 
-    threading.Thread(target=auto_market_scanner, args=(tg_app,), daemon=True).start()
+    # ფონური მონიტორინგის უსაფრთხოდ ჩართვა (ყოველ 3 წუთში = 180 წამი)
+    job_queue = tg_app.job_queue
+    if job_queue:
+        job_queue.run_repeating(auto_market_scanner_job, interval=180, first=10)
 
     print("Bot is up and running...")
-    main_loop = asyncio.get_event_loop()
     tg_app.run_polling()
 
 if __name__ == "__main__":
