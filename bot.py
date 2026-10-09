@@ -285,16 +285,28 @@ def home():
 def run_flask():
     app.run(host='0.0.0.0', port=PORT, debug=False, use_reloader=False)
 
+# --- Force Delete Webhook Helper ---
+def reset_webhook():
+    if TELEGRAM_BOT_TOKEN:
+        try:
+            url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/deleteWebhook?drop_pending_updates=true"
+            requests.get(url, timeout=5)
+            print("Webhook cleared successfully.")
+        except Exception as e:
+            print(f"Failed to clear webhook: {e}")
+
 # --- Main Entry Point ---
 def main():
     if not TELEGRAM_BOT_TOKEN:
         print("Error: TELEGRAM_BOT_TOKEN environment variable is missing!")
         return
 
-    # Flask სერვერი ფონურ Thread-ში
+    reset_webhook()
+
+    # Flask background thread
     threading.Thread(target=run_flask, daemon=True).start()
 
-    # Telegram Bot-ის სტანდარტული გაშვება
+    # Telegram Bot setup
     tg_app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
 
     tg_app.add_handler(CommandHandler("start", start_command))
@@ -303,7 +315,7 @@ def main():
     tg_app.add_handler(CommandHandler("news", news_command))
     tg_app.add_handler(CommandHandler("status", status_command))
 
-    print("Bot is up and running...")
+    print("Bot is listening for commands...")
     tg_app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
