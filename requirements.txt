@@ -5,3 +5,5 @@ textblob
 requests
 flask
 python-telegram-bot[job-queue]==20.7
+APScheduler==3.10.4
+ptbcontrib
