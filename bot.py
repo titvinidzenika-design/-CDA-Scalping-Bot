@@ -1,6 +1,6 @@
 import os
 import time
-import threading
+import asyncio
 import pandas as pd
 import ccxt
 import feedparser
@@ -8,6 +8,7 @@ from textblob import TextBlob
 from flask import Flask
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from apscheduler.schedulers.background import BackgroundScheduler
 
 # --- Configuration & Environment Variables ---
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -16,6 +17,7 @@ PORT = int(os.getenv("PORT", "10000"))
 # Cooldown Tracker & Chat ID Storage
 last_signal_time = {}
 user_chat_ids = set()
+tg_app_global = None
 
 # --- CCXT Exchange Setup ---
 exchange = ccxt.binance({
@@ -239,11 +241,12 @@ app = Flask(__name__)
 def home():
     return "CDA Scalping Bot 2.0 is Alive and Running!"
 
-def run_flask():
-    app.run(host='0.0.0.0', port=PORT)
+# --- Background Scanner Job ---
+def scan_market_job():
+    global tg_app_global
+    if not tg_app_global:
+        return
 
-# --- Background Market Scanner Job Queue ---
-async def auto_market_scanner_job(context: ContextTypes.DEFAULT_TYPE):
     symbols = ["BTC/USDT", "SOL/USDT"]
     for symbol in symbols:
         try:
@@ -263,7 +266,7 @@ async def auto_market_scanner_job(context: ContextTypes.DEFAULT_TYPE):
                 )
                 for cid in list(user_chat_ids):
                     try:
-                        await context.bot.send_message(chat_id=cid, text=alert_text)
+                        asyncio.run(tg_app_global.bot.send_message(chat_id=cid, text=alert_text))
                     except Exception as e:
                         print(f"Failed to send alert to {cid}: {e}")
         except Exception as e:
@@ -271,15 +274,14 @@ async def auto_market_scanner_job(context: ContextTypes.DEFAULT_TYPE):
 
 # --- Main Application Start ---
 def main():
+    global tg_app_global
     if not TELEGRAM_BOT_TOKEN:
         print("Error: TELEGRAM_BOT_TOKEN environment variable is missing!")
         return
 
-    # Flask გაშვება ფონურად
-    threading.Thread(target=run_flask, daemon=True).start()
-
-    # Telegram Bot
+    # Telegram App setup
     tg_app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+    tg_app_global = tg_app
 
     tg_app.add_handler(CommandHandler("start", start_command))
     tg_app.add_handler(CommandHandler("btc", btc_command))
@@ -287,9 +289,10 @@ def main():
     tg_app.add_handler(CommandHandler("news", news_command))
     tg_app.add_handler(CommandHandler("status", status_command))
 
-    # JobQueue ჩართვა
-    if tg_app.job_queue:
-        tg_app.job_queue.run_repeating(auto_market_scanner_job, interval=180, first=10)
+    # APScheduler Background Scanner (Every 3 mins)
+    scheduler = BackgroundScheduler()
+    scheduler.add_job(scan_market_job, 'interval', minutes=3)
+    scheduler.start()
 
     print("Bot is up and running...")
     tg_app.run_polling()
