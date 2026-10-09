@@ -3,7 +3,6 @@ import time
 import threading
 import requests
 import pandas as pd
-import numpy as np
 import ccxt
 import feedparser
 from deep_translator import GoogleTranslator
@@ -63,80 +62,51 @@ def calculate_indicators(df):
 
     return df
 
-# --- Candlestick Patterns Detector (1, 2, 3 Candles) ---
-def detect_candlestick_patterns(df):
-    if df is None or len(df) < 4:
+# --- Pattern Detection (1, 2, 3 Candles + W/M) ---
+def detect_patterns(df):
+    if df is None or len(df) < 30:
         return []
     
     patterns = []
-    c0 = df.iloc[-1]  # მიმდინარე
-    c1 = df.iloc[-2]  # წინა
-    c2 = df.iloc[-3]  # 2 სანთლის წინ
+    c0 = df.iloc[-1]
+    c1 = df.iloc[-2]
+    c2 = df.iloc[-3]
 
     body0 = abs(c0['close'] - c0['open'])
     range0 = c0['high'] - c0['low']
     body1 = abs(c1['close'] - c1['open'])
-    body2 = abs(c2['close'] - c2['open'])
 
-    if range0 == 0:
-        return []
+    if range0 > 0:
+        upper_wick = c0['high'] - max(c0['open'], c0['close'])
+        lower_wick = min(c0['open'], c0['close']) - c0['low']
 
-    upper_wick0 = c0['high'] - max(c0['open'], c0['close'])
-    lower_wick0 = min(c0['open'], c0['close']) - c0['low']
+        # 1-Candle
+        if body0 <= (range0 * 0.1):
+            patterns.append("Doji")
+        elif lower_wick >= (2 * body0) and upper_wick <= (body0 * 0.5):
+            patterns.append("Hammer" if c0['close'] > c0['open'] else "Hanging Man")
+        elif upper_wick >= (2 * body0) and lower_wick <= (body0 * 0.5):
+            patterns.append("Inverted Hammer" if c0['close'] > c0['open'] else "Shooting Star")
 
-    # --- 1-Candle ---
-    if body0 <= (range0 * 0.1):
-        patterns.append("⚖️ Doji")
-    elif lower_wick0 >= (2 * body0) and upper_wick0 <= (body0 * 0.5):
-        patterns.append("🔨 Hammer" if c0['close'] > c0['open'] else "🩸 Hanging Man")
-    elif upper_wick0 >= (2 * body0) and lower_wick0 <= (body0 * 0.5):
-        patterns.append("📐 Inverted Hammer" if c0['close'] > c0['open'] else "🌠 Shooting Star")
+        # 2-Candle
+        if c1['close'] < c1['open'] and c0['close'] > c0['open'] and c0['close'] >= c1['open']:
+            patterns.append("Bullish Engulfing")
+        elif c1['close'] > c1['open'] and c0['close'] < c0['open'] and c0['close'] <= c1['open']:
+            patterns.append("Bearish Engulfing")
 
-    # --- 2-Candle ---
-    if c1['close'] < c1['open'] and c0['close'] > c0['open'] and c0['close'] >= c1['open'] and c0['open'] <= c1['close']:
-        patterns.append("🟢 Bullish Engulfing")
-    elif c1['close'] > c1['open'] and c0['close'] < c0['open'] and c0['close'] <= c1['open'] and c0['open'] >= c1['close']:
-        patterns.append("🔴 Bearish Engulfing")
+        # 3-Candle
+        if c2['close'] < c2['open'] and body1 < (abs(c2['close'] - c2['open']) * 0.3) and c0['close'] > c0['open']:
+            patterns.append("Morning Star")
+        elif c2['close'] > c2['open'] and body1 < (abs(c2['close'] - c2['open']) * 0.3) and c0['close'] < c0['open']:
+            patterns.append("Evening Star")
 
-    # --- 3-Candle ---
-    if c2['close'] < c2['open'] and body1 < (abs(c2['close'] - c2['open']) * 0.3) and c0['close'] > c0['open']:
-        patterns.append("🌄 Morning Star")
-    elif c2['close'] > c2['open'] and body1 < (abs(c2['close'] - c2['open']) * 0.3) and c0['close'] < c0['open']:
-        patterns.append("🌇 Evening Star")
-
-    return patterns
-
-# --- Chart Patterns (M, W, Head & Shoulders, Flags) ---
-def detect_chart_patterns(df):
-    if df is None or len(df) < 30:
-        return []
-
-    patterns = []
-    highs, lows = [], []
-
-    for i in range(2, len(df) - 2):
-        if df['high'].iloc[i] > df['high'].iloc[i-1] and df['high'].iloc[i] > df['high'].iloc[i+1]:
-            highs.append(df['high'].iloc[i])
-        if df['low'].iloc[i] < df['low'].iloc[i-1] and df['low'].iloc[i] < df['low'].iloc[i+1]:
-            lows.append(df['low'].iloc[i])
-
-    # W (Double Bottom) / M (Double Top)
-    if len(lows) >= 2 and abs(lows[-1] - lows[-2]) / lows[-2] < 0.005:
-        patterns.append("🇼 Double Bottom (W)")
-    if len(highs) >= 2 and abs(highs[-1] - highs[-2]) / highs[-2] < 0.005:
-        patterns.append("🇲 Double Top (M)")
-
-    # Head & Shoulders
-    if len(highs) >= 3 and highs[-2] > highs[-3] and highs[-2] > highs[-1]:
-        patterns.append("👤 Head & Shoulders")
-
-    # Flags
-    recent = df.tail(10)
-    move = (recent['close'].iloc[-1] - recent['close'].iloc[0]) / recent['close'].iloc[0]
-    if move > 0.015:
-        patterns.append("🚩 Bullish Flag")
-    elif move < -0.015:
-        patterns.append("🏴 Bearish Flag")
+    # W / M Figures
+    lows = df['low'].tail(20).values
+    highs = df['high'].tail(20).values
+    if len(lows) >= 10 and abs(min(lows[:5]) - min(lows[-5:])) / min(lows[:5]) < 0.005:
+        patterns.append("W Pattern (Double Bottom)")
+    if len(highs) >= 10 and abs(max(highs[:5]) - max(highs[-5:])) / max(highs[:5]) < 0.005:
+        patterns.append("M Pattern (Double Top)")
 
     return patterns
 
@@ -144,19 +114,13 @@ def detect_chart_patterns(df):
 def calculate_fibonacci(df):
     if df is None or len(df) < 50:
         return {}
-
-    high_price = df['high'].tail(50).max()
-    low_price = df['low'].tail(50).min()
-    diff = high_price - low_price
-
+    high = df['high'].tail(50).max()
+    low = df['low'].tail(50).min()
+    diff = high - low
     return {
-        'fib_0': high_price,
-        'fib_0.236': high_price - 0.236 * diff,
-        'fib_0.382': high_price - 0.382 * diff,
-        'fib_0.500': high_price - 0.500 * diff,
-        'fib_0.618': high_price - 0.618 * diff,
-        'fib_0.786': high_price - 0.786 * diff,
-        'fib_1': low_price
+        '0.382': high - 0.382 * diff,
+        '0.500': high - 0.500 * diff,
+        '0.618': high - 0.618 * diff
     }
 
 # --- Free News Fetcher ---
@@ -166,6 +130,7 @@ def get_crypto_news():
         "https://www.coindesk.com/arc/outboundfeeds/rss/",
         "https://cointelegraph.com/rss"
     ]
+    
     news_list = []
     translator = GoogleTranslator(source='en', target='ka')
     
@@ -176,15 +141,25 @@ def get_crypto_news():
                 title = entry.get('title', '')
                 link = entry.get('link', '')
                 if title and link:
-                    polarity = TextBlob(title).sentiment.polarity
-                    signal = "🟢 <b>BUY (LONG)</b>" if polarity > 0.05 else ("🔴 <b>SELL (SHORT)</b>" if polarity < -0.05 else "⚪ <b>NEUTRAL</b>")
+                    analysis = TextBlob(title)
+                    polarity = analysis.sentiment.polarity
+                    
+                    if polarity > 0.05:
+                        signal = "🟢 <b>BUY (LONG)</b>"
+                    elif polarity < -0.05:
+                        signal = "🔴 <b>SELL (SHORT)</b>"
+                    else:
+                        signal = "⚪ <b>NEUTRAL</b>"
 
                     try:
                         translated_title = translator.translate(title)
-                    except Exception:
+                    except Exception as tr_err:
+                        print(f"Translation Error: {tr_err}")
                         translated_title = title
 
-                    news_list.append(f"• <a href='{link}'>{translated_title}</a>\n  └ <b>სიგნალი:</b> {signal}")
+                    item_str = f"• <a href='{link}'>{translated_title}</a>\n  └ <b>სიგნალი:</b> {signal}"
+                    news_list.append(item_str)
+            
             if len(news_list) >= 5:
                 break
         except Exception as e:
@@ -192,7 +167,7 @@ def get_crypto_news():
 
     return "\n\n".join(news_list[:5]) if news_list else "❌ სიახლეების წამოღება ვერ მოხერხდა."
 
-# --- Multi-Timeframe & Complete Technical Analysis ---
+# --- Multi-Timeframe & Entry/SL/TP Strategy Logic ---
 def analyze_market(symbol):
     df_5m = fetch_ohlcv_pd(symbol, timeframe='5m', limit=200)
     df_1h = fetch_ohlcv_pd(symbol, timeframe='1h', limit=200)
@@ -214,111 +189,118 @@ def analyze_market(symbol):
     vol_sma_5m = curr_5m['vol_sma20']
     ema200_1h = curr_1h['ema200']
 
-    # Detect Patterns & Fibonacci
-    candle_patterns = detect_candlestick_patterns(df_5m)
-    chart_patterns = detect_chart_patterns(df_5m)
-    fib = calculate_fibonacci(df_5m)
-
-    all_patterns = candle_patterns + chart_patterns
-    patterns_text = ", ".join(all_patterns) if all_patterns else "🔍 არ არის აქტიური ფიგურა"
+    patterns_found = detect_patterns(df_5m)
+    fib_levels = calculate_fibonacci(df_5m)
+    patterns_text = ", ".join(patterns_found) if patterns_found else "არ არის აქტიური პატერნი"
 
     signal = None
     vol_spike = vol_5m > (vol_sma_5m * 1.3)
 
-    # Combined Strategy Logic
     if price > ema200_5m and price > ema200_1h and rsi_5m < 65 and vol_spike:
-        signal = "BUY (LONG)"
-    elif price < ema200_5m and price < ema200_1h and rsi_5m > 35 and vol_spike:
-        signal = "SELL (SHORT)"
+        if curr_5m['rsi'] > 45:
+            signal = "BUY (LONG)"
 
-    # TP & SL calculation with Fibonacci & ATR
+    elif price < ema200_5m and price < ema200_1h and rsi_5m > 35 and vol_spike:
+        if curr_5m['rsi'] < 55:
+            signal = "SELL (SHORT)"
+
+    # Exact Entry, SL (-%), TP (+%) Calculation
+    entry = price
+    sl, tp = 0.0, 0.0
+    sl_pct, tp_pct = 0.0, 0.0
+
     if signal == "BUY (LONG)":
-        sl = min(price - (1.5 * atr_5m), fib.get('fib_0.618', price * 0.98))
-        tp = max(price + (3.0 * atr_5m), fib.get('fib_0.236', price * 1.04))
+        sl = entry - (1.5 * atr_5m)
+        tp = entry + (3.0 * atr_5m)
+        sl_pct = ((sl - entry) / entry) * 100
+        tp_pct = ((tp - entry) / entry) * 100
     elif signal == "SELL (SHORT)":
-        sl = max(price + (1.5 * atr_5m), fib.get('fib_0.382', price * 1.02))
-        tp = min(price - (3.0 * atr_5m), fib.get('fib_0.786', price * 0.96))
-    else:
-        sl, tp = 0.0, 0.0
+        sl = entry + (1.5 * atr_5m)
+        tp = entry - (3.0 * atr_5m)
+        sl_pct = ((entry - sl) / entry) * 100
+        tp_pct = ((entry - tp) / entry) * 100
 
     return {
         'symbol': symbol,
         'price': price,
+        'entry': entry,
         'rsi_5m': rsi_5m,
         'ema200_5m': ema200_5m,
         'ema200_1h': ema200_1h,
         'vol_spike': vol_spike,
         'patterns': patterns_text,
-        'fib': fib,
+        'fib': fib_levels,
         'signal': signal,
         'sl': sl,
-        'tp': tp
+        'tp': tp,
+        'sl_pct': sl_pct,
+        'tp_pct': tp_pct
     }
 
 # --- Telegram Bot Commands ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = (
-        "🚀 <b>24/7 AI Crypto & Technical Pattern Monitor ჩართულია!</b>\n\n"
+        "🚀 <b>24/7 AI Crypto Monitor 2.0 ჩართულია!</b>\n\n"
         "📜 <b>ხელმისაწვდომი ბრძანებები:</b>\n"
-        "▶ /btc – BTC/USDT სრული ანალიზი (Patterns + Fib + TP/SL)\n"
-        "▶ /sol – SOL/USDT სრული ანალიზი (Patterns + Fib + TP/SL)\n"
-        "▶ /news – უახლესი სიახლეები ქართულად + სიგნალი\n"
+        "▶ /btc – BTC/USDT-ის Entry/SL/TP ანალიზი\n"
+        "▶ /sol – SOL/USDT-ის Entry/SL/TP ანალიზი\n"
+        "▶ /news – სიახლეები ქართულად + სიგნალი\n"
         "▶ /status – ბოტის სტატუსი"
     )
     await update.message.reply_text(msg, parse_mode="HTML")
 
 async def btc_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("⏳ ითვლება BTC/USDT სრული ტექნიკური ანალიზი...")
+    await update.message.reply_text("⏳ ითვლება BTC/USDT სავაჭრო ორდერი...")
     data = analyze_market("BTC/USDT")
     if not data:
         await update.message.reply_text("❌ მონაცემების წამოღება ვერ მოხერხდა.")
         return
     
     res = (
-        f"📊 <b>BTC/USDT სრული ტექნიკური ანალიზი</b>\n\n"
-        f"🔹 <b>ფასი:</b> ${data['price']:.2f}\n"
+        f"📊 <b>BTC/USDT ანალიზი & ორდერი</b>\n\n"
+        f"🔹 <b>მიმდინარე ფასი:</b> ${data['price']:.2f}\n"
         f"🔹 <b>RSI (5m):</b> {data['rsi_5m']:.1f}\n"
-        f"🔹 <b>EMA 200 (5m):</b> ${data['ema200_5m']:.2f}\n"
-        f"🔹 <b>EMA 200 (1h):</b> ${data['ema200_1h']:.2f}\n"
         f"🔹 <b>Volume Spike:</b> {'✅ კი' if data['vol_spike'] else '❌ არა'}\n"
-        f"🕯 <b>პატერნები / ფიგურები:</b>\n  └ {data['patterns']}\n\n"
-        f"📐 <b>Fibonacci დონეები (50 bars):</b>\n"
-        f"  └ 0.382: ${data['fib'].get('fib_0.382', 0):.2f}\n"
-        f"  └ 0.500: ${data['fib'].get('fib_0.500', 0):.2f}\n"
-        f"  └ 0.618: ${data['fib'].get('fib_0.618', 0):.2f}\n\n"
+        f"🕯 <b>პატერნი:</b> {data['patterns']}\n"
+        f"📐 <b>Fib 0.5:</b> ${data['fib'].get('0.500', 0):.2f}\n\n"
         f"💡 <b>სიგნალი:</b> {data['signal'] if data['signal'] else 'HOLD (მოლოდინში)'}\n"
     )
     if data['signal']:
-        res += f"🎯 <b>Take Profit:</b> ${data['tp']:.2f}\n🛑 <b>Stop Loss:</b> ${data['sl']:.2f}\n"
+        res += (
+            f"\n📥 <b>Entry (შესვლა):</b> ${data['entry']:.2f}\n"
+            f"🛑 <b>Stop Loss (SL):</b> ${data['sl']:.2f} ({data['sl_pct']:.2f}%)\n"
+            f"🎯 <b>Take Profit (TP):</b> ${data['tp']:.2f} (+{data['tp_pct']:.2f}%)\n"
+            f"⚖️ <b>Risk/Reward Ratio:</b> 1:2\n"
+        )
     await update.message.reply_text(res, parse_mode="HTML")
 
 async def sol_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("⏳ ითვლება SOL/USDT სრული ტექნიკური ანალიზი...")
+    await update.message.reply_text("⏳ ითვლება SOL/USDT სავაჭრო ორდერი...")
     data = analyze_market("SOL/USDT")
     if not data:
         await update.message.reply_text("❌ მონაცემების წამოღება ვერ მოხერხდა.")
         return
 
     res = (
-        f"📊 <b>SOL/USDT სრული ტექნიკური ანალიზი</b>\n\n"
-        f"🔹 <b>ფასი:</b> ${data['price']:.2f}\n"
+        f"📊 <b>SOL/USDT ანალიზი & ორდერი</b>\n\n"
+        f"🔹 <b>მიმდინარე ფასი:</b> ${data['price']:.2f}\n"
         f"🔹 <b>RSI (5m):</b> {data['rsi_5m']:.1f}\n"
-        f"🔹 <b>EMA 200 (5m):</b> ${data['ema200_5m']:.2f}\n"
-        f"🔹 <b>EMA 200 (1h):</b> ${data['ema200_1h']:.2f}\n"
         f"🔹 <b>Volume Spike:</b> {'✅ კი' if data['vol_spike'] else '❌ არა'}\n"
-        f"🕯 <b>პატერნები / ფიგურები:</b>\n  └ {data['patterns']}\n\n"
-        f"📐 <b>Fibonacci დონეები (50 bars):</b>\n"
-        f"  └ 0.382: ${data['fib'].get('fib_0.382', 0):.2f}\n"
-        f"  └ 0.500: ${data['fib'].get('fib_0.500', 0):.2f}\n"
-        f"  └ 0.618: ${data['fib'].get('fib_0.618', 0):.2f}\n\n"
+        f"🕯 <b>პატერნი:</b> {data['patterns']}\n"
+        f"📐 <b>Fib 0.5:</b> ${data['fib'].get('0.500', 0):.2f}\n\n"
         f"💡 <b>სიგნალი:</b> {data['signal'] if data['signal'] else 'HOLD (მოლოდინში)'}\n"
     )
     if data['signal']:
-        res += f"🎯 <b>Take Profit:</b> ${data['tp']:.2f}\n🛑 <b>Stop Loss:</b> ${data['sl']:.2f}\n"
+        res += (
+            f"\n📥 <b>Entry (შესვლა):</b> ${data['entry']:.2f}\n"
+            f"🛑 <b>Stop Loss (SL):</b> ${data['sl']:.2f} ({data['sl_pct']:.2f}%)\n"
+            f"🎯 <b>Take Profit (TP):</b> ${data['tp']:.2f} (+{data['tp_pct']:.2f}%)\n"
+            f"⚖️ <b>Risk/Reward Ratio:</b> 1:2\n"
+        )
     await update.message.reply_text(res, parse_mode="HTML")
 
 async def news_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("⏳ იტვირთება და ითარგმნება სიახლეები...")
+    await update.message.reply_text("⏳ იტვირთება, ითარგმნება და ანალიზდება სიახლეები...")
     news_text = get_crypto_news()
     res = f"📰 <b>უახლესი კრიპტო სიახლეები:</b>\n\n{news_text}"
     await update.message.reply_text(res, parse_mode="HTML", disable_web_page_preview=True)
@@ -331,7 +313,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Crypto Scalping Bot with Patterns & Fibonacci is Alive!"
+    return "Scalping Bot is Alive!"
 
 def run_flask():
     app.run(host='0.0.0.0', port=PORT)
@@ -349,7 +331,10 @@ def auto_market_scanner():
                         continue
 
                     last_signal_time[symbol] = now
-                    print(f"ALERT: {symbol} -> {data['signal']} | TP: {data['tp']} | SL: {data['sl']}")
+                    print(
+                        f"ALERT: {symbol} -> {data['signal']} | "
+                        f"ENTRY: {data['entry']:.2f} | TP: {data['tp']:.2f} | SL: {data['sl']:.2f}"
+                    )
 
             time.sleep(180)
         except Exception as e:
