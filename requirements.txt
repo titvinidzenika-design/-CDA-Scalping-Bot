@@ -1,6 +1,5 @@
 ccxt
 pandas
-feedparser
-textblob
+numpy
 requests
 python-telegram-bot==20.7
