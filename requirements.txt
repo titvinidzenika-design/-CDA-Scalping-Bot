@@ -2,8 +2,7 @@ ccxt
 pandas
 requests
 flask
-gunicorn
 feedparser
 deep-translator
 textblob
-python-telegram-bot==20.7
+pyTelegramBotAPI
