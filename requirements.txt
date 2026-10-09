@@ -1,8 +1,8 @@
 ccxt
 pandas
-numpy
 requests
 flask
 feedparser
 deep-translator
 textblob
+python-telegram-bot==20.7
