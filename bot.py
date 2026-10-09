@@ -5,13 +5,11 @@ import pandas as pd
 import ccxt
 import feedparser
 from textblob import TextBlob
-from flask import Flask
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 # --- Configuration & Environment Variables ---
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-PORT = int(os.getenv("PORT", "10000"))
 
 # Cooldown Tracker & Chat ID Storage
 last_signal_time = {}
@@ -232,54 +230,55 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_chat_ids.add(update.effective_chat.id)
     await update.message.reply_text("✅ სტატუსი: ბოტი აქტიურია და 24/7 მონიტორინგი ჩართულია!")
 
-# --- Native Native JobQueue Scanner ---
-async def scan_market_job(context: ContextTypes.DEFAULT_TYPE):
-    symbols = ["BTC/USDT", "SOL/USDT"]
-    for symbol in symbols:
+# --- Background Scanner Task ---
+async def market_scanner_loop(app):
+    await asyncio.sleep(5)
+    while True:
         try:
-            data = analyze_market(symbol)
-            if data and data['signal']:
-                now = time.time()
-                if symbol in last_signal_time and (now - last_signal_time[symbol]) < 900:
-                    continue
+            symbols = ["BTC/USDT", "SOL/USDT"]
+            for symbol in symbols:
+                data = analyze_market(symbol)
+                if data and data['signal']:
+                    now = time.time()
+                    if symbol in last_signal_time and (now - last_signal_time[symbol]) < 900:
+                        continue
 
-                last_signal_time[symbol] = now
-                alert_text = (
-                    f"🚨 ავტომატური სიგნალი: {data['symbol']}\n\n"
-                    f"💡 მოქმედება: {data['signal']}\n"
-                    f"🔹 მიმდინარე ფასი: ${data['price']:.2f}\n"
-                    f"🎯 Take Profit: ${data['tp']:.2f}\n"
-                    f"🛑 Stop Loss: ${data['sl']:.2f}\n"
-                )
-                for cid in list(user_chat_ids):
-                    try:
-                        await context.bot.send_message(chat_id=cid, text=alert_text)
-                    except Exception as e:
-                        print(f"Failed to send alert to {cid}: {e}")
+                    last_signal_time[symbol] = now
+                    alert_text = (
+                        f"🚨 ავტომატური სიგნალი: {data['symbol']}\n\n"
+                        f"💡 მოქმედება: {data['signal']}\n"
+                        f"🔹 მიმდინარე ფასი: ${data['price']:.2f}\n"
+                        f"🎯 Take Profit: ${data['tp']:.2f}\n"
+                        f"🛑 Stop Loss: ${data['sl']:.2f}\n"
+                    )
+                    for cid in list(user_chat_ids):
+                        try:
+                            await app.bot.send_message(chat_id=cid, text=alert_text)
+                        except Exception as e:
+                            print(f"Failed to send alert: {e}")
         except Exception as e:
-            print(f"Error scanning {symbol}: {e}")
+            print(f"Error in scanner loop: {e}")
+        
+        await asyncio.sleep(180) # Check every 3 minutes
 
-# --- Main Application Start ---
+async def post_init(app):
+    asyncio.create_task(market_scanner_loop(app))
+
+# --- Main Application ---
 def main():
     if not TELEGRAM_BOT_TOKEN:
-        print("Error: TELEGRAM_BOT_TOKEN environment variable is missing!")
+        print("Error: TELEGRAM_BOT_TOKEN missing!")
         return
 
-    # Telegram Bot App
-    tg_app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+    tg_app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).build()
 
-    # Handlers
     tg_app.add_handler(CommandHandler("start", start_command))
     tg_app.add_handler(CommandHandler("btc", btc_command))
     tg_app.add_handler(CommandHandler("sol", sol_command))
     tg_app.add_handler(CommandHandler("news", news_command))
     tg_app.add_handler(CommandHandler("status", status_command))
 
-    # JobQueue Background Scanner (Every 3 minutes)
-    if tg_app.job_queue:
-        tg_app.job_queue.run_repeating(scan_market_job, interval=180, first=10)
-
-    print("Bot is up and running...")
+    print("Bot is starting...")
     tg_app.run_polling()
 
 if __name__ == "__main__":
