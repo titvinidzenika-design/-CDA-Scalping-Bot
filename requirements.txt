@@ -1,4 +1,8 @@
+python-telegram-bot
 ccxt
 pandas
 requests
-python-telegram-bot==20.7
+flask
+feedparser
+deep-translator
+textblob
