@@ -4,6 +4,4 @@ feedparser
 textblob
 requests
 flask
-python-telegram-bot==20.7
-APScheduler
-pytz
+python-telegram-bot[job-queue]==20.7
