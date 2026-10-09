@@ -1,0 +1,7 @@
+ccxt
+pandas
+feedparser
+textblob
+requests
+flask
+python-telegram-bot[job-queue]==20.7
