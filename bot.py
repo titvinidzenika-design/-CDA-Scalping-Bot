@@ -8,7 +8,6 @@ from textblob import TextBlob
 from flask import Flask
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
-from apscheduler.schedulers.background import BackgroundScheduler
 
 # --- Configuration & Environment Variables ---
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -17,7 +16,6 @@ PORT = int(os.getenv("PORT", "10000"))
 # Cooldown Tracker & Chat ID Storage
 last_signal_time = {}
 user_chat_ids = set()
-tg_app_global = None
 
 # --- CCXT Exchange Setup ---
 exchange = ccxt.binance({
@@ -174,10 +172,10 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = (
         "🚀 24/7 AI Crypto Monitor ჩართულია!\n\n"
         "📜 ხელმისაწვდომი ბრძანებები:\n"
-        "▶ /btc – BTC/USDT-ის მომენტალური ანალიზი\n"
-        "▶ /sol – SOL/USDT-ის მომენტალური ანალიზი\n"
-        "▶ /news – უახლესი გლობალური სიახლეები\n"
-        "▶ /status – ბოტის სტატუსის შემოწმება"
+        "/btc – BTC/USDT-ის მომენტალური ანალიზი\n"
+        "/sol – SOL/USDT-ის მომენტალური ანალიზი\n"
+        "/news – უახლესი გლობალური სიახლეები\n"
+        "/status – ბოტის სტატუსის შემოწმება"
     )
     await update.message.reply_text(msg)
 
@@ -234,19 +232,8 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_chat_ids.add(update.effective_chat.id)
     await update.message.reply_text("✅ სტატუსი: ბოტი აქტიურია და 24/7 მონიტორინგი ჩართულია!")
 
-# --- Flask Server ---
-app = Flask(__name__)
-
-@app.route('/')
-def home():
-    return "CDA Scalping Bot 2.0 is Alive and Running!"
-
-# --- Background Scanner Job ---
-def scan_market_job():
-    global tg_app_global
-    if not tg_app_global:
-        return
-
+# --- Native Native JobQueue Scanner ---
+async def scan_market_job(context: ContextTypes.DEFAULT_TYPE):
     symbols = ["BTC/USDT", "SOL/USDT"]
     for symbol in symbols:
         try:
@@ -266,7 +253,7 @@ def scan_market_job():
                 )
                 for cid in list(user_chat_ids):
                     try:
-                        asyncio.run(tg_app_global.bot.send_message(chat_id=cid, text=alert_text))
+                        await context.bot.send_message(chat_id=cid, text=alert_text)
                     except Exception as e:
                         print(f"Failed to send alert to {cid}: {e}")
         except Exception as e:
@@ -274,25 +261,23 @@ def scan_market_job():
 
 # --- Main Application Start ---
 def main():
-    global tg_app_global
     if not TELEGRAM_BOT_TOKEN:
         print("Error: TELEGRAM_BOT_TOKEN environment variable is missing!")
         return
 
-    # Telegram App setup
+    # Telegram Bot App
     tg_app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
-    tg_app_global = tg_app
 
+    # Handlers
     tg_app.add_handler(CommandHandler("start", start_command))
     tg_app.add_handler(CommandHandler("btc", btc_command))
     tg_app.add_handler(CommandHandler("sol", sol_command))
     tg_app.add_handler(CommandHandler("news", news_command))
     tg_app.add_handler(CommandHandler("status", status_command))
 
-    # APScheduler Background Scanner (Every 3 mins)
-    scheduler = BackgroundScheduler()
-    scheduler.add_job(scan_market_job, 'interval', minutes=3)
-    scheduler.start()
+    # JobQueue Background Scanner (Every 3 minutes)
+    if tg_app.job_queue:
+        tg_app.job_queue.run_repeating(scan_market_job, interval=180, first=10)
 
     print("Bot is up and running...")
     tg_app.run_polling()
