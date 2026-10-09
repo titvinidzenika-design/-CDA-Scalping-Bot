@@ -1,6 +1,5 @@
 import os
 import time
-import asyncio
 import threading
 import requests
 import pandas as pd
@@ -286,16 +285,16 @@ def home():
 def run_flask():
     app.run(host='0.0.0.0', port=PORT, debug=False, use_reloader=False)
 
-# --- Async Main Runner ---
-async def main():
+# --- Main Entry Point ---
+def main():
     if not TELEGRAM_BOT_TOKEN:
         print("Error: TELEGRAM_BOT_TOKEN environment variable is missing!")
         return
 
-    # Flask background thread
+    # Flask სერვერი ფონურ Thread-ში
     threading.Thread(target=run_flask, daemon=True).start()
 
-    # Build Async Telegram Application
+    # Telegram Bot-ის სტანდარტული გაშვება
     tg_app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
 
     tg_app.add_handler(CommandHandler("start", start_command))
@@ -304,13 +303,8 @@ async def main():
     tg_app.add_handler(CommandHandler("news", news_command))
     tg_app.add_handler(CommandHandler("status", status_command))
 
-    print("Bot starting via Async Engine...")
-    async with tg_app:
-        await tg_app.start()
-        await tg_app.updater.start_polling()
-        # Keep process alive
-        while True:
-            await asyncio.sleep(3600)
+    print("Bot is up and running...")
+    tg_app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
