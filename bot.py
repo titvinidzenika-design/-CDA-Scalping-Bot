@@ -2,9 +2,8 @@ import os
 import time
 import asyncio
 import pandas as pd
+import numpy as np
 import ccxt
-import feedparser
-from textblob import TextBlob
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
@@ -19,100 +18,189 @@ exchange = ccxt.binance({
     'options': {'defaultType': 'spot'}
 })
 
-# --- News Analysis (Global Headlines Only) ---
-def get_global_news_summary():
-    rss_urls = [
-        "https://www.cryptoglobe.com/latest/feed/",
-        "https://www.coindesk.com/arc/outboundfeeds/rss/",
-        "https://cointelegraph.com/rss"
-    ]
-    
-    news_lines = []
-    for url in rss_urls:
-        try:
-            feed = feedparser.parse(url)
-            for entry in feed.entries[:3]:
-                title = entry.get('title', '').strip()
-                if title:
-                    polarity = TextBlob(title).sentiment.polarity
-                    
-                    if polarity > 0.05:
-                        signal = "🟢 BUY"
-                    elif polarity < -0.05:
-                        signal = "🔴 SELL"
-                    else:
-                        signal = "⚪ NEUTRAL"
-
-                    news_lines.append(f"• {title}\n  └ სიგნალი: {signal}")
-            if len(news_lines) >= 5:
-                break
-        except Exception as e:
-            print(f"Error parsing RSS {url}: {e}")
-
-    return "\n\n".join(news_lines[:5]) if news_lines else "❌ სიახლეების წამოღება ვერ მოხერხდა."
-
-# --- Candlestick Patterns & Indicators ---
-def fetch_ohlcv_pd(symbol, timeframe='5m', limit=100):
+# --- Fetch Data ---
+def fetch_ohlcv(symbol, timeframe='5m', limit=100):
     try:
         ohlcv = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
         return df
     except Exception as e:
-        print(f"Error fetching OHLCV for {symbol}: {e}")
+        print(f"Error fetching {symbol} ({timeframe}): {e}")
         return None
 
+# --- Advanced Candlestick Patterns ---
 def detect_candlestick_patterns(df):
-    if len(df) < 2:
-        return "אין პატერნი"
+    if len(df) < 4:
+        return []
     
-    curr = df.iloc[-1]
-    prev = df.iloc[-2]
-    
-    body_curr = abs(curr['close'] - curr['open'])
-    range_curr = curr['high'] - curr['low']
-    
-    if range_curr == 0:
-        return "⚪ ნეიტრალური"
-
     patterns = []
-    
+    c0 = df.iloc[-1]  # Current candle
+    c1 = df.iloc[-2]  # Previous candle
+    c2 = df.iloc[-3]  # 2 candles ago
+
+    # Helper calculations
+    body0 = abs(c0['close'] - c0['open'])
+    range0 = c0['high'] - c0['low']
+    body1 = abs(c1['close'] - c1['open'])
+    range1 = c1['high'] - c1['low']
+    body2 = abs(c2['close'] - c2['open'])
+
+    if range0 == 0:
+        return []
+
+    upper_wick0 = c0['high'] - max(c0['open'], c0['close'])
+    lower_wick0 = min(c0['open'], c0['close']) - c0['low']
+
+    # --- 1-Candle Patterns ---
+    if body0 <= (range0 * 0.1):
+        if lower_wick0 >= (2.5 * body0) and upper_wick0 <= (body0 * 0.5):
+            patterns.append("🐉 Dragonfly Doji")
+        elif upper_wick0 >= (2.5 * body0) and lower_wick0 <= (body0 * 0.5):
+            patterns.append("🪦 Gravestone Doji")
+        else:
+            patterns.append("⚖️ Doji")
+    elif body0 >= (range0 * 0.85):
+        if c0['close'] > c0['open']:
+            patterns.append("🟩 Bullish Marubozu")
+        else:
+            patterns.append("🟥 Bearish Marubozu")
+    else:
+        if lower_wick0 >= (2 * body0) and upper_wick0 <= (body0 * 0.5):
+            if c0['close'] > c0['open']:
+                patterns.append("🔨 Hammer")
+            else:
+                patterns.append("🩸 Hanging Man")
+        elif upper_wick0 >= (2 * body0) and lower_wick0 <= (body0 * 0.5):
+            if c0['close'] > c0['open']:
+                patterns.append("📐 Inverted Hammer")
+            else:
+                patterns.append("🌠 Shooting Star")
+
+    # --- 2-Candle Patterns ---
     # Engulfing
-    if prev['close'] < prev['open'] and curr['close'] > curr['open']:
-        if curr['close'] >= prev['open'] and curr['open'] <= prev['close']:
+    if c1['close'] < c1['open'] and c0['close'] > c0['open']:
+        if c0['close'] >= c1['open'] and c0['open'] <= c1['close']:
             patterns.append("🟢 Bullish Engulfing")
-            
-    if prev['close'] > prev['open'] and curr['close'] < curr['open']:
-        if curr['close'] <= prev['open'] and curr['open'] >= prev['close']:
+    elif c1['close'] > c1['open'] and c0['close'] < c0['open']:
+        if c0['close'] <= c1['open'] and c0['open'] >= c1['close']:
             patterns.append("🔴 Bearish Engulfing")
-            
-    # Hammer / Shooting Star
-    lower_wick = min(curr['open'], curr['close']) - curr['low']
-    upper_wick = curr['high'] - max(curr['open'], curr['close'])
+
+    # Piercing Line & Dark Cloud Cover
+    if c1['close'] < c1['open'] and c0['close'] > c0['open']:
+        if c0['open'] < c1['low'] and c0['close'] > (c1['open'] + c1['close']) / 2:
+            patterns.append("🌅 Piercing Line")
+    elif c1['close'] > c1['open'] and c0['close'] < c0['open']:
+        if c0['open'] > c1['high'] and c0['close'] < (c1['open'] + c1['close']) / 2:
+            patterns.append("🌩 Dark Cloud Cover")
+
+    # Tweezers
+    if abs(c0['low'] - c1['low']) <= (range0 * 0.05) and lower_wick0 > body0:
+        patterns.append("🧲 Tweezer Bottom")
+    elif abs(c0['high'] - c1['high']) <= (range0 * 0.05) and upper_wick0 > body0:
+        patterns.append("🧲 Tweezer Top")
+
+    # --- 3-Candle Patterns ---
+    # Morning Star & Evening Star
+    if c2['close'] < c2['open'] and body1 < (abs(c2['close'] - c2['open']) * 0.3) and c0['close'] > c0['open'] and c0['close'] > ((c2['open'] + c2['close']) / 2):
+        patterns.append("🌄 Morning Star")
+    elif c2['close'] > c2['open'] and body1 < (abs(c2['close'] - c2['open']) * 0.3) and c0['close'] < c0['open'] and c0['close'] < ((c2['open'] + c2['close']) / 2):
+        patterns.append("🌇 Evening Star")
+
+    # Three White Soldiers & Three Black Crows
+    if c2['close'] > c2['open'] and c1['close'] > c1['open'] and c0['close'] > c0['open']:
+        if c0['close'] > c1['close'] > c2['close']:
+            patterns.append("⚔️ Three White Soldiers")
+    elif c2['close'] < c2['open'] and c1['close'] < c1['open'] and c0['close'] < c0['open']:
+        if c0['close'] < c1['close'] < c2['close']:
+            patterns.append("🦅 Three Black Crows")
+
+    return patterns
+
+# --- Chart Pattern Recognition (M, W, Head & Shoulders, Flag) ---
+def detect_chart_patterns(df):
+    if len(df) < 40:
+        return []
+
+    chart_patterns = []
+
+    # Find Swing Highs and Swing Lows
+    highs = []
+    lows = []
     
-    if lower_wick >= (2 * body_curr) and upper_wick <= (body_curr * 0.5):
-        patterns.append("🔨 Hammer")
-        
-    if upper_wick >= (2 * body_curr) and lower_wick <= (body_curr * 0.5):
-        patterns.append("🌠 Shooting Star")
+    for i in range(2, len(df) - 2):
+        if df['high'].iloc[i] > df['high'].iloc[i-1] and df['high'].iloc[i] > df['high'].iloc[i-2] and \
+           df['high'].iloc[i] > df['high'].iloc[i+1] and df['high'].iloc[i] > df['high'].iloc[i+2]:
+            highs.append((i, df['high'].iloc[i]))
+            
+        if df['low'].iloc[i] < df['low'].iloc[i-1] and df['low'].iloc[i] < df['low'].iloc[i-2] and \
+           df['low'].iloc[i] < df['low'].iloc[i+1] and df['low'].iloc[i] < df['low'].iloc[i+2]:
+            lows.append((i, df['low'].iloc[i]))
 
-    if body_curr <= (range_curr * 0.1):
-        patterns.append("⚖️ Doji")
+    # Double Bottom (W Pattern) & Double Top (M Pattern)
+    if len(lows) >= 2:
+        l1, l2 = lows[-2][1], lows[-1][1]
+        if abs(l1 - l2) / l1 < 0.005:  # Lows within 0.5%
+            chart_patterns.append("🇼 Double Bottom (W ფიგურა)")
 
-    return ", ".join(patterns) if patterns else "🔍 სტანდარტული სანთელი"
+    if len(highs) >= 2:
+        h1, h2 = highs[-2][1], highs[-1][1]
+        if abs(h1 - h2) / h1 < 0.005:  # Highs within 0.5%
+            chart_patterns.append("🇲 Double Top (M ფიგურა)")
 
+    # Head and Shoulders / Inverse Head and Shoulders
+    if len(highs) >= 3:
+        h1, h2, h3 = highs[-3][1], highs[-2][1], highs[-1][1]
+        if h2 > h1 and h2 > h3 and abs(h1 - h3) / h1 < 0.01:
+            chart_patterns.append("👤 Head & Shoulders (თავი და მხრები)")
+
+    if len(lows) >= 3:
+        l1, l2, l3 = lows[-3][1], lows[-2][1], lows[-1][1]
+        if l2 < l1 and l2 < l3 and abs(l1 - l3) / l1 < 0.01:
+            chart_patterns.append("🙃 Inverse Head & Shoulders")
+
+    # Flag Patterns (Consolidation after a move)
+    recent = df.tail(15)
+    move = (recent['close'].iloc[-1] - recent['close'].iloc[0]) / recent['close'].iloc[0]
+    volatility = (recent['high'].max() - recent['low'].min()) / recent['close'].mean()
+
+    if move > 0.02 and volatility < 0.015:
+        chart_patterns.append("🚩 Bullish Flag (ხარის დროშა)")
+    elif move < -0.02 and volatility < 0.015:
+        chart_patterns.append("🏴 Bearish Flag (დათვის დროშა)")
+
+    return chart_patterns
+
+# --- Indicators & Strategy Core ---
 def calculate_indicators(df):
     if df is None or len(df) < 50:
         return df
 
+    # EMA 50 / 200
+    df['ema50'] = df['close'].ewm(span=50, adjust=False).mean()
     df['ema200'] = df['close'].ewm(span=200, adjust=False).mean()
 
+    # RSI (14)
     delta = df['close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
     rs = gain / loss
     df['rsi'] = 100 - (100 / (1 + rs))
 
+    # MACD (12, 26, 9)
+    exp1 = df['close'].ewm(span=12, adjust=False).mean()
+    exp2 = df['close'].ewm(span=26, adjust=False).mean()
+    df['macd'] = exp1 - exp2
+    df['macd_signal'] = df['macd'].ewm(span=9, adjust=False).mean()
+    df['macd_hist'] = df['macd'] - df['macd_signal']
+
+    # Bollinger Bands (20, 2)
+    df['bb_middle'] = df['close'].rolling(window=20).mean()
+    std = df['close'].rolling(window=20).std()
+    df['bb_upper'] = df['bb_middle'] + (std * 2)
+    df['bb_lower'] = df['bb_middle'] - (std * 2)
+
+    # ATR (14)
     high_low = df['high'] - df['low']
     high_close = (df['high'] - df['close'].shift()).abs()
     low_close = (df['low'] - df['close'].shift()).abs()
@@ -122,24 +210,42 @@ def calculate_indicators(df):
     return df
 
 def analyze_market(symbol):
-    df = fetch_ohlcv_pd(symbol, timeframe='5m', limit=100)
-    if df is None:
+    df_5m = fetch_ohlcv(symbol, timeframe='5m', limit=100)
+    df_1h = fetch_ohlcv(symbol, timeframe='1h', limit=60)
+
+    if df_5m is None or df_1h is None:
         return None
 
-    df = calculate_indicators(df)
-    pattern = detect_candlestick_patterns(df)
-    curr = df.iloc[-1]
+    df_5m = calculate_indicators(df_5m)
+    df_1h = calculate_indicators(df_1h)
 
-    price = curr['close']
-    ema200 = curr['ema200']
-    rsi = curr['rsi']
-    atr = curr['atr']
+    curr_5m = df_5m.iloc[-1]
+    curr_1h = df_1h.iloc[-1]
 
+    candle_patterns = detect_candlestick_patterns(df_5m)
+    chart_patterns = detect_chart_patterns(df_5m)
+
+    all_patterns = candle_patterns + chart_patterns
+    patterns_str = ", ".join(all_patterns) if all_patterns else "🔍 არ არის აქტიური ფიგურა"
+
+    price = curr_5m['close']
+    rsi = curr_5m['rsi']
+    macd_hist = curr_5m['macd_hist']
+    atr = curr_5m['atr']
+    bb_lower = curr_5m['bb_lower']
+    bb_upper = curr_5m['bb_upper']
+
+    main_trend = "BULLISH 🟢" if curr_1h['close'] > curr_1h['ema200'] else "BEARISH 🔴"
+
+    # Signal Confluence Logic
     signal = None
-    if price > ema200 and rsi < 65:
-        signal = "BUY (LONG)"
-    elif price < ema200 and rsi > 35:
-        signal = "SELL (SHORT)"
+    if main_trend == "BULLISH 🟢":
+        if (rsi < 42 or price <= bb_lower or "🇼 Double Bottom (W ფიგურა)" in chart_patterns or "🟢 Bullish Engulfing" in candle_patterns) and macd_hist > 0:
+            signal = "BUY (LONG)"
+
+    elif main_trend == "BEARISH 🔴":
+        if (rsi > 58 or price >= bb_upper or "🇲 Double Top (M ფიგურა)" in chart_patterns or "🔴 Bearish Engulfing" in candle_patterns) and macd_hist < 0:
+            signal = "SELL (SHORT)"
 
     sl = price - (1.5 * atr) if signal == "BUY (LONG)" else price + (1.5 * atr)
     tp = price + (3.0 * atr) if signal == "BUY (LONG)" else price - (3.0 * atr)
@@ -147,9 +253,10 @@ def analyze_market(symbol):
     return {
         'symbol': symbol,
         'price': price,
+        'main_trend': main_trend,
         'rsi': rsi,
-        'ema200': ema200,
-        'pattern': pattern,
+        'macd_hist': macd_hist,
+        'patterns': patterns_str,
         'signal': signal,
         'sl': sl,
         'tp': tp
@@ -159,7 +266,7 @@ def analyze_market(symbol):
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user_chat_ids.add(chat_id)
-    await update.message.reply_text("🚀 Crypto Bot აქტიურია!\n\nბრძანებები:\n/btc\n/sol\n/news\n/status")
+    await update.message.reply_text("🚀 Pro Pattern & Technical Analysis Bot აქტიურია!\n\nბრძანებები:\n/btc\n/sol\n/status")
 
 async def btc_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_chat_ids.add(update.effective_chat.id)
@@ -167,16 +274,19 @@ async def btc_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not data:
         await update.message.reply_text("❌ შეცდომა მონაცემების წამოღებისას.")
         return
+    
     res = (
-        f"📊 BTC/USDT ანალიზი\n\n"
+        f"📊 BTC/USDT სრული ტექნიკური ანალიზი\n\n"
         f"🔹 ფასი: ${data['price']:.2f}\n"
-        f"🔹 RSI: {data['rsi']:.1f}\n"
-        f"🔹 EMA200: ${data['ema200']:.2f}\n"
-        f"🕯 პატერნი: {data['pattern']}\n\n"
-        f"💡 სიგნალი: {data['signal'] if data['signal'] else 'HOLD'}\n"
+        f"📈 1H მთავარი ტრენდი: {data['main_trend']}\n"
+        f"🔹 RSI (5M): {data['rsi']:.1f}\n"
+        f"🔹 MACD Hist: {data['macd_hist']:.2f}\n"
+        f"🕯 პატერნები & ფიგურები:\n  └ {data['patterns']}\n\n"
+        f"💡 სიგნალი: {data['signal'] if data['signal'] else 'HOLD (მოლოდინი)'}\n"
     )
     if data['signal']:
-        res += f"🎯 TP: ${data['tp']:.2f} | 🛑 SL: ${data['sl']:.2f}"
+        res += f"🎯 TP: ${data['tp']:.2f}\n🛑 SL: ${data['sl']:.2f}"
+    
     await update.message.reply_text(res)
 
 async def sol_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -185,29 +295,26 @@ async def sol_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not data:
         await update.message.reply_text("❌ შეცდომა მონაცემების წამოღებისას.")
         return
+    
     res = (
-        f"📊 SOL/USDT ანალიზი\n\n"
+        f"📊 SOL/USDT სრული ტექნიკური ანალიზი\n\n"
         f"🔹 ფასი: ${data['price']:.2f}\n"
-        f"🔹 RSI: {data['rsi']:.1f}\n"
-        f"🔹 EMA200: ${data['ema200']:.2f}\n"
-        f"🕯 პატერნი: {data['pattern']}\n\n"
-        f"💡 სიგნალი: {data['signal'] if data['signal'] else 'HOLD'}\n"
+        f"📈 1H მთავარი ტრენდი: {data['main_trend']}\n"
+        f"🔹 RSI (5M): {data['rsi']:.1f}\n"
+        f"🔹 MACD Hist: {data['macd_hist']:.2f}\n"
+        f"🕯 პატერნები & ფიგურები:\n  └ {data['patterns']}\n\n"
+        f"💡 სიგნალი: {data['signal'] if data['signal'] else 'HOLD (მოლოდინი)'}\n"
     )
     if data['signal']:
-        res += f"🎯 TP: ${data['tp']:.2f} | 🛑 SL: ${data['sl']:.2f}"
+        res += f"🎯 TP: ${data['tp']:.2f}\n🛑 SL: ${data['sl']:.2f}"
+    
     await update.message.reply_text(res)
-
-async def news_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_chat_ids.add(update.effective_chat.id)
-    await update.message.reply_text("⏳ იტვირთება გლობალური სიახლეები...")
-    news_text = get_global_news_summary()
-    await update.message.reply_text(f"📰 გლობალური სიახლეები & სიგნალები:\n\n{news_text}")
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_chat_ids.add(update.effective_chat.id)
-    await update.message.reply_text("✅ ბოტი მუშაობს!")
+    await update.message.reply_text("✅ ბოტი აქტიურია და ფიგურებს სკანირებს!")
 
-# --- Background Task ---
+# --- 24/7 Scanner Loop ---
 async def market_scanner_loop(app):
     await asyncio.sleep(5)
     while True:
@@ -223,7 +330,8 @@ async def market_scanner_loop(app):
                     alert = (
                         f"🚨 ავტომატური სიგნალი: {data['symbol']}\n"
                         f"💡 {data['signal']}\n"
-                        f"🕯 {data['pattern']}\n"
+                        f"📈 1H ტრენდი: {data['main_trend']}\n"
+                        f"🕯 ფიგურები: {data['patterns']}\n"
                         f"🔹 ფასი: ${data['price']:.2f}\n"
                         f"🎯 TP: ${data['tp']:.2f} | 🛑 SL: ${data['sl']:.2f}"
                     )
@@ -250,7 +358,6 @@ def main():
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("btc", btc_command))
     app.add_handler(CommandHandler("sol", sol_command))
-    app.add_handler(CommandHandler("news", news_command))
     app.add_handler(CommandHandler("status", status_command))
 
     print("Bot starting...")
