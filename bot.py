@@ -1,11 +1,11 @@
 import os
 import time
 import threading
+import asyncio
 import pandas as pd
 import ccxt
 import feedparser
 from textblob import TextBlob
-from datetime import datetime
 from flask import Flask
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
@@ -246,32 +246,37 @@ def home():
 def run_flask():
     app.run(host='0.0.0.0', port=PORT)
 
-# --- Automated Background Job inside Telegram Application ---
-async def auto_market_scanner_job(context: ContextTypes.DEFAULT_TYPE):
-    symbols = ["BTC/USDT", "SOL/USDT"]
-    for symbol in symbols:
+# --- Automated Background Scanner Loop ---
+async def send_alert_async(tg_app, alert_text):
+    for cid in list(user_chat_ids):
         try:
-            data = analyze_market(symbol)
-            if data and data['signal']:
-                now = time.time()
-                if symbol in last_signal_time and (now - last_signal_time[symbol]) < 900:
-                    continue
-
-                last_signal_time[symbol] = now
-                alert_text = (
-                    f"🚨 ავტომატური სიგნალი: {data['symbol']}\n\n"
-                    f"💡 მოქმედება: {data['signal']}\n"
-                    f"🔹 მიმდინარე ფასი: ${data['price']:.2f}\n"
-                    f"🎯 Take Profit: ${data['tp']:.2f}\n"
-                    f"🛑 Stop Loss: ${data['sl']:.2f}\n"
-                )
-                for cid in list(user_chat_ids):
-                    try:
-                        await context.bot.send_message(chat_id=cid, text=alert_text)
-                    except Exception as e:
-                        print(f"Alert push failed for {cid}: {e}")
+            await tg_app.bot.send_message(chat_id=cid, text=alert_text)
         except Exception as e:
-            print(f"Error scanning {symbol}: {e}")
+            print(f"Failed alert send: {e}")
+
+def bg_scanner_thread(tg_app, loop):
+    symbols = ["BTC/USDT", "SOL/USDT"]
+    while True:
+        try:
+            time.sleep(180)
+            for symbol in symbols:
+                data = analyze_market(symbol)
+                if data and data['signal']:
+                    now = time.time()
+                    if symbol in last_signal_time and (now - last_signal_time[symbol]) < 900:
+                        continue
+
+                    last_signal_time[symbol] = now
+                    alert_text = (
+                        f"🚨 ავტომატური სიგნალი: {data['symbol']}\n\n"
+                        f"💡 მოქმედება: {data['signal']}\n"
+                        f"🔹 მიმდინარე ფასი: ${data['price']:.2f}\n"
+                        f"🎯 Take Profit: ${data['tp']:.2f}\n"
+                        f"🛑 Stop Loss: ${data['sl']:.2f}\n"
+                    )
+                    asyncio.run_coroutine_threadsafe(send_alert_async(tg_app, alert_text), loop)
+        except Exception as e:
+            print(f"Scanner error: {e}")
 
 # --- Main Application Start ---
 def main():
@@ -279,25 +284,24 @@ def main():
         print("Error: TELEGRAM_BOT_TOKEN environment variable is missing!")
         return
 
-    # Flask-ის გაშვება ცალკე Thread-ში
+    # Flask სერვერის გაშვება
     threading.Thread(target=run_flask, daemon=True).start()
 
-    # Telegram Bot-ის ინიციალიზაცია
+    # Telegram ბოტი
     tg_app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
 
-    # ბრძანებების დამატება
     tg_app.add_handler(CommandHandler("start", start_command))
     tg_app.add_handler(CommandHandler("btc", btc_command))
     tg_app.add_handler(CommandHandler("sol", sol_command))
     tg_app.add_handler(CommandHandler("news", news_command))
     tg_app.add_handler(CommandHandler("status", status_command))
 
-    # ფონური მონიტორინგის უსაფრთხოდ ჩართვა (ყოველ 3 წუთში = 180 წამი)
-    job_queue = tg_app.job_queue
-    if job_queue:
-        job_queue.run_repeating(auto_market_scanner_job, interval=180, first=10)
+    print("Bot is starting polling...")
+    
+    # Event loop-ის მითითება ფონური მონიტორინგისთვის
+    loop = asyncio.get_event_loop()
+    threading.Thread(target=bg_scanner_thread, args=(tg_app, loop), daemon=True).start()
 
-    print("Bot is up and running...")
     tg_app.run_polling()
 
 if __name__ == "__main__":
